@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    container_name: btc_breakout_api
+    ports:
+      - "8000:8000"
+    environment:
+      - BINANCE_BASE_URL=${BINANCE_BASE_URL:-https://api.binance.us}
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+      - BARK_NOTIFY_URL=${BARK_NOTIFY_URL:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
