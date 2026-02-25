@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8"/>
+  <title>BTCUSDT 4h 趋势线绘制 (Binance.US)</title>
+  <style>
+    body { margin:0; background:#000; color:#e6e6e6; font-family:"Noto Sans SC", sans-serif; }
+    #wrap { display:flex; height:100vh; }
+    #left { flex:1; position:relative; background:#000; }
+    #right { width:320px; padding:16px; background:#000; box-shadow: inset 1px 0 0 #111; overflow:auto; }
+    canvas { width:100%; height:100%; display:block; background:#000; }
+    button { margin:6px 0; width:100%; padding:8px; background:#1f1f1f; color:#fff; border:1px solid #333; cursor:pointer; }
+    button.active { background:#2d3a52; border-color:#4dd0e1; }
+    textarea { width:100%; height:180px; background:#000; color:#d6d6d6; border:1px solid #333; }
+    .hint { font-size:12px; color:#aaa; margin:6px 0; }
+    input, select {
+      width:100%;
+      padding:8px;
+      background:#000;
+      color:#d6d6d6;
+      border:1px solid #333;
+      box-sizing:border-box;
+    }
+    label { font-size:12px; color:#aaa; display:block; margin-top:10px; }
+    kbd { background:#000; border:1px solid #333; border-bottom-width:2px; padding:1px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="left">
+    <canvas id="cv"></canvas>
+  </div>
+
+  <div id="right">
+    <h3>趋势线导出</h3>
+    <div class="hint">
+      先点右侧 <b>画趋势线</b> 按钮进入画线模式；点击两次画布：确定一条趋势线的两个点（时间自动对齐到最近K线）。<br/>
+      滚轮缩放（时间窗口）；<kbd>Ctrl</kbd>/<kbd>Alt</kbd>+滚轮缩放价格轴；按住左键拖动平移。<br/>
+      吸附：默认吸附到该根K线的 high/low（更近哪个吸哪个），按住 <kbd>Shift</kbd> 临时关闭。<br/>
+      趋势线：绘制时自动延长到当前可见窗口左右边界。<br/>
+      <kbd>Esc</kbd> 退出画线模式。
+    </div>
+
+    <button id="reload">重新加载数据</button>
+    <button id="drawBtn">画趋势线（开/关）</button>
+    <button id="clear">清空趋势线</button>
+
+    <label>symbol</label>
+    <input id="symbol" value="BTCUSDT" />
+
+    <label>usd_amount</label>
+    <input id="usd" type="number" value="100" min="0" step="1" />
+
+    <label>mode</label>
+    <select id="mode">
+      <option value="simulate" selected>simulate</option>
+      <option value="live">live</option>
+    </select>
+
+    <button id="export">导出趋势线点</button>
+
+    <textarea id="out" readonly></textarea>
+    <div class="hint">
+      导出格式：ts1/price1/ts2/price2/symbol/usd_amount/mode + 固定 interval_seconds/max_checks/stop_on_breakout（导出最后一条趋势线）。
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("cv");
+const ctx = canvas.getContext("2d");
+const out = document.getElementById("out");
+
+const symbolInput = document.getElementById("symbol");
+const usdInput = document.getElementById("usd");
+const modeSelect = document.getElementById("mode");
+const drawBtn = document.getElementById("drawBtn");
+
+let data = [];
+let lines = [];
+let tempPoint = null;
+let hoverPoint = null;
+
+// 画线模式开关：只有开启时，点击画布才会落点/成线
+let drawMode = false;
+
+// 视窗（横向K线窗口）+ 纵向缩放
+let view = {
+  start: 0,
+  end: 0,
+  yZoom: 1.0
+};
+
+// 拖拽平移状态
+let drag = {
+  on: false,
+  x0: 0,
+  start0: 0,
+  end0: 0
+};
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+function resize() {
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
+  draw();
+}
+window.addEventListener("resize", resize);
+resize();
+
+async function loadData() {
+  out.value = "加载中...";
+  const symbol = (symbolInput.value || "BTCUSDT").trim().toUpperCase();
+
+  // ✅ 时间周期改为 4h
+  const url = `https://api.binance.us/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=4h&limit=500`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const raw = await res.json();
+    if (!Array.isArray(raw)) throw new Error("返回数据格式异常");
+
+    data = raw.map(k => ({
+      ts: k[0],
+      open: +k[1],
+      high: +k[2],
+      low: +k[3],
+      close: +k[4],
+      vol: +k[5]
+    }));
+
+    // 初始化视窗
+    view.start = 0;
+    view.end = Math.max(0, data.length - 1);
+    view.yZoom = 1.0;
+
+    out.value = "";
+    draw();
+  } catch (e) {
+    data = [];
+    draw();
+    out.value = "加载失败：\n" + (e?.message || String(e));
+  }
+}
+
+function getVisibleRange() {
+  const n = data.length;
+  if (!n) return { start: 0, end: 0 };
+  const s = clamp(view.start, 0, n - 1);
+  const e = clamp(view.end, 0, n - 1);
+  return s <= e ? { start: s, end: e } : { start: e, end: s };
+}
+
+function getScale() {
+  const pad = 40;
+  const w = canvas.width;
+  const h = canvas.height;
+  const n = data.length;
+  if (!n) return null;
+
+  const { start, end } = getVisibleRange();
+  const span = Math.max(1, end - start);
+
+  // 可见区价格范围
+  let maxP = -Infinity, minP = Infinity;
+  for (let i = start; i <= end; i++) {
+    const d = data[i];
+    if (d.high > maxP) maxP = d.high;
+    if (d.low < minP) minP = d.low;
+  }
+  if (!isFinite(maxP) || !isFinite(minP) || maxP === minP) {
+    maxP = isFinite(maxP) ? maxP : 1;
+    minP = isFinite(minP) ? minP : 0;
+    if (maxP === minP) { maxP += 1; minP -= 1; }
+  }
+
+  // 纵向缩放：围绕中点拉伸区间
+  const mid = (maxP + minP) / 2;
+  const half = (maxP - minP) / 2 * (view.yZoom || 1.0);
+  maxP = mid + half;
+  minP = mid - half;
+
+  const xScale = (i) => pad + ((i - start) * (w - pad * 2) / span);
+  const yScale = (p) => h - pad - (p - minP) * (h - pad * 2) / (maxP - minP);
+
+  const invX = (x) => {
+    const t = (x - pad) / (w - pad * 2);
+    return Math.round(start + t * span);
+  };
+  const invY = (y) => minP + (h - pad - y) * (maxP - minP) / (h - pad * 2);
+
+  return { xScale, yScale, invX, invY, pad, start, end, minP, maxP };
+}
+
+// 自动吸附 high/low
+function snapToHighLow(i, p) {
+  const d = data[i];
+  if (!d) return p;
+  const dh = Math.abs(p - d.high);
+  const dl = Math.abs(p - d.low);
+  return (dh < dl) ? d.high : d.low;
+}
+
+// 延长趋势线到当前可见窗口左右边界
+function extendLineToView(l, sc) {
+  const { start, end } = sc;
+
+  // i1 == i2：竖线
+  if (l.i1 === l.i2) {
+    const i = l.i1;
+    return {
+      x1: sc.xScale(i),
+      y1: sc.yScale(sc.maxP),
+      x2: sc.xScale(i),
+      y2: sc.yScale(sc.minP),
+      vertical: true
+    };
+  }
+
+  const m = (l.p2 - l.p1) / (l.i2 - l.i1);
+  const pStart = l.p1 + m * (start - l.i1);
+  const pEnd   = l.p1 + m * (end   - l.i1);
+
+  return {
+    x1: sc.xScale(start),
+    y1: sc.yScale(pStart),
+    x2: sc.xScale(end),
+    y2: sc.yScale(pEnd),
+    vertical: false
+  };
+}
+
+function draw() {
+  // 纯黑背景
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!data.length) return;
+
+  const sc = getScale();
+  if (!sc) return;
+  const { xScale, yScale, pad, start, end } = sc;
+
+  // 不画网格线（按要求）
+
+  // K线（只画可见区）
+  const visibleCount = end - start + 1;
+  const barW = Math.max(2, (canvas.width - pad * 2) / visibleCount * 0.7);
+
+  for (let i = start; i <= end; i++) {
+    const d = data[i];
+    const x = xScale(i);
+    const yOpen = yScale(d.open);
+    const yClose = yScale(d.close);
+    const yHigh = yScale(d.high);
+    const yLow = yScale(d.low);
+
+    ctx.strokeStyle = d.close >= d.open ? "#4caf50" : "#ef5350";
+    ctx.beginPath();
+    ctx.moveTo(x, yHigh);
+    ctx.lineTo(x, yLow);
+    ctx.stroke();
+
+    ctx.fillStyle = d.close >= d.open ? "#4caf50" : "#ef5350";
+    const y = Math.min(yOpen, yClose);
+    const hh = Math.max(1, Math.abs(yOpen - yClose));
+    ctx.fillRect(x - barW / 2, y, barW, hh);
+  }
+
+  // 趋势线（延长到可见窗口左右边界）
+  ctx.strokeStyle = "#4dd0e1";
+  ctx.lineWidth = 2;
+  lines.forEach(l => {
+    const ex = extendLineToView(l, sc);
+    ctx.beginPath();
+    ctx.moveTo(ex.x1, ex.y1);
+    ctx.lineTo(ex.x2, ex.y2);
+    ctx.stroke();
+  });
+
+  // 临时线（预览）
+  if (drawMode && tempPoint && hoverPoint) {
+    const tmp = { i1: tempPoint.i, p1: tempPoint.p, i2: hoverPoint.i, p2: hoverPoint.p };
+    const ex = extendLineToView(tmp, sc);
+
+    ctx.strokeStyle = "#ffd54f";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(ex.x1, ex.y1);
+    ctx.lineTo(ex.x2, ex.y2);
+    ctx.stroke();
+  }
+
+  // 临时点
+  if (drawMode && tempPoint) {
+    ctx.fillStyle = "#ffd54f";
+    ctx.beginPath();
+    ctx.arc(xScale(tempPoint.i), yScale(tempPoint.p), 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.lineWidth = 1;
+}
+
+// 点击：两点成线（只有 drawMode=true 才响应）
+canvas.addEventListener("click", (e) => {
+  if (!drawMode) return;
+  if (!data.length) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const sc = getScale();
+  if (!sc) return;
+
+  const { invX, invY } = sc;
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  let i = invX(x);
+  i = clamp(i, 0, data.length - 1);
+
+  let p = invY(y);
+  if (!e.shiftKey) p = snapToHighLow(i, p);
+
+  if (!tempPoint) {
+    tempPoint = { i, p };
+  } else {
+    lines.push({
+      i1: tempPoint.i,
+      i2: i,
+      p1: tempPoint.p,
+      p2: p,
+      ts1: data[tempPoint.i].ts,
+      ts2: data[i].ts
+    });
+    tempPoint = null;
+    hoverPoint = null;
+  }
+  draw();
+});
+
+// 预览：吸附（Shift 临时关闭吸附）
+canvas.addEventListener("mousemove", (e) => {
+  if (!drawMode) return;
+  if (!data.length) return;
+  if (drag.on) return;
+  if (!tempPoint) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const sc = getScale();
+  if (!sc) return;
+
+  const { invX, invY } = sc;
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  let i = invX(x);
+  i = clamp(i, 0, data.length - 1);
+
+  let p = invY(y);
+  if (!e.shiftKey) p = snapToHighLow(i, p);
+
+  hoverPoint = { i, p };
+  draw();
+});
+
+canvas.addEventListener("mouseleave", () => {
+  hoverPoint = null;
+  draw();
+});
+
+// 滚轮缩放：横向窗口；Ctrl/Alt + 滚轮：纵向价格缩放
+canvas.addEventListener("wheel", (e) => {
+  if (!data.length) return;
+  e.preventDefault();
+
+  const sc = getScale();
+  if (!sc) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+
+  let anchor = sc.invX(x);
+  anchor = clamp(anchor, 0, data.length - 1);
+
+  const r = getVisibleRange();
+  const span = Math.max(5, r.end - r.start);
+  const zoomIn = e.deltaY < 0;
+  const factor = zoomIn ? 0.85 : 1.15;
+
+  let newSpan = Math.round(span * factor);
+  newSpan = clamp(newSpan, 5, Math.max(5, data.length - 1));
+
+  const t = (anchor - r.start) / span;
+
+  let ns = Math.round(anchor - t * newSpan);
+  let ne = ns + newSpan;
+
+  const maxI = data.length - 1;
+  if (ns < 0) { ns = 0; ne = ns + newSpan; }
+  if (ne > maxI) { ne = maxI; ns = ne - newSpan; }
+  ns = clamp(ns, 0, maxI);
+  ne = clamp(ne, 0, maxI);
+
+  view.start = ns;
+  view.end = ne;
+
+  if (e.ctrlKey || e.altKey) {
+    view.yZoom *= zoomIn ? 0.9 : 1.1;
+    view.yZoom = clamp(view.yZoom, 0.3, 5.0);
+  }
+
+  draw();
+}, { passive: false });
+
+// 拖拽平移
+canvas.addEventListener("mousedown", (e) => {
+  if (!data.length) return;
+  drag.on = true;
+  drag.x0 = e.clientX;
+
+  const r = getVisibleRange();
+  drag.start0 = r.start;
+  drag.end0 = r.end;
+});
+
+window.addEventListener("mouseup", () => {
+  drag.on = false;
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!drag.on || !data.length) return;
+
+  const sc = getScale();
+  if (!sc) return;
+
+  const dx = e.clientX - drag.x0;
+  const span = Math.max(1, drag.end0 - drag.start0);
+
+  const pixelsPerIndex = (canvas.width - sc.pad * 2) / span;
+  if (pixelsPerIndex <= 0) return;
+
+  const di = Math.round(-dx / pixelsPerIndex);
+
+  let ns = drag.start0 + di;
+  let ne = drag.end0 + di;
+
+  const maxI = data.length - 1;
+  if (ns < 0) { ne -= ns; ns = 0; }
+  if (ne > maxI) { ns -= (ne - maxI); ne = maxI; }
+
+  ns = clamp(ns, 0, maxI);
+  ne = clamp(ne, 0, maxI);
+
+  view.start = ns;
+  view.end = ne;
+
+  draw();
+});
+
+// 画线按钮：开/关
+function setDrawMode(on) {
+  drawMode = !!on;
+  drawBtn.classList.toggle("active", drawMode);
+  canvas.style.cursor = drawMode ? "crosshair" : "default";
+  if (!drawMode) {
+    tempPoint = null;
+    hoverPoint = null;
+  }
+  draw();
+}
+drawBtn.onclick = () => setDrawMode(!drawMode);
+
+// ESC 退出画线模式
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") setDrawMode(false);
+});
+
+// UI 按钮
+document.getElementById("reload").onclick = loadData;
+
+document.getElementById("clear").onclick = () => {
+  lines = [];
+  tempPoint = null;
+  hoverPoint = null;
+  draw();
+  out.value = "";
+};
+
+document.getElementById("export").onclick = () => {
+  if (!lines.length) {
+    out.value = "没有趋势线可导出：请先点“画趋势线”，再在图上点击两次画一条线。";
+    return;
+  }
+
+  const l = lines[lines.length - 1];
+  const symbol = (symbolInput.value || "BTCUSDT").trim().toUpperCase();
+  const usd_amount = Number(usdInput.value || 0);
+  const mode = modeSelect.value || "simulate";
+
+  // ✅ 固定字段：interval_seconds=15, max_checks=null, stop_on_breakout=true
+  const payload = {
+    ts1: l.ts1,
+    price1: l.p1,
+    ts2: l.ts2,
+    price2: l.p2,
+    symbol,
+    usd_amount,
+    mode,
+    interval_seconds: 15,
+    max_checks: null,
+    stop_on_breakout: true
+  };
+
+  out.value = JSON.stringify(payload, null, 2);
+};
+
+loadData();
+</script>
+</body>
+</html>
