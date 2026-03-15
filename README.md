@@ -1,12 +1,12 @@
 # BTC Breakout
 
 基于两点趋势线的突破检测工具，提供：
-- `main.py`：FastAPI 服务，支持后台轮询任务
+- `main.py`：FastAPI 服务，支持后台轮询任务、后端 AI 截图识别和 Telegram 机器人收图识别
 - `1.html`：网页端工作台，支持按页面模式切换手动画线和 AI 截图识别
 
 ## 项目结构
 
-- `main.py`：API 服务，支持创建/查询后台轮询任务
+- `main.py`：API 服务，支持创建/查询后台轮询任务，并可按环境变量启动 Telegram 机器人
 - `1.html`：前端页面，容器内由 FastAPI 根路径 `/` 直接提供
 - `Dockerfile` / `docker-compose.yml`：容器化运行
 - `OPENROUTER_PROMPT.md`：截图识别 prompt 说明
@@ -35,6 +35,8 @@ docker compose logs -f api
 - 根路径：`http://127.0.0.1:8000/`，默认进入手动画线页
 - API：`http://127.0.0.1:8000/signal/watch`
 
+如果同时配置了 `OPENROUTER_API_KEY` 和 `TELEGRAM_BOT_TOKEN`，容器启动后会自动开启 Telegram 长轮询机器人。
+
 停止并清理：
 
 ```bash
@@ -56,7 +58,46 @@ docker compose down
 注意：
 
 - 浏览器直连 OpenRouter 会把 API Key 暴露在当前页面环境里，只适合本机调试
-- 正式部署建议把 OpenRouter 调用迁移到后端代理
+- 正式部署建议把 OpenRouter 调用迁移到后端代理，或直接使用 Telegram 机器人方式
+
+## Telegram 机器人识别
+
+Telegram 机器人会复用 `1.html` 的同一套识别逻辑：
+
+- 同样的 OpenRouter system prompt 和 JSON schema
+- 同样的日期级时间线索恢复逻辑
+- 同样的“按最近两根 K 线 high/low 吸附锚点”修复逻辑
+- 返回同结构的 `api_payload`，可直接提交到 `/signal/watch`
+
+启动条件：
+
+- `OPENROUTER_API_KEY` 已配置
+- `TELEGRAM_BOT_TOKEN` 已配置
+- 可选：`TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321` 限制可用 chat id
+
+机器人命令：
+
+- `/help`：查看说明
+- `/config`：设置当前 chat 的默认参数
+- `/showconfig`：查看当前默认参数
+- `/resetconfig`：重置为环境变量默认值
+- `/last`：查看最近一次识别结果
+
+图片 caption 或 `/config` 支持的参数：
+
+```text
+symbol=BTCUSDT
+timeframe=1h
+usd_amount=100
+mode=simulate
+chart_timezone=UTC
+target_line_hint=蓝色下降压力线
+```
+
+建议：
+
+- 尽量以“文件/原图”方式发送 TradingView 截图，避免 Telegram 压缩后影响识别
+- 如果不写 caption，机器人会使用当前 chat 的默认参数
 
 ### 1) 创建后台轮询任务
 
@@ -139,6 +180,17 @@ curl -sS 'http://127.0.0.1:8000/signal/watch/<job_id>'
 - `BINANCE_API_KEY`：`mode="live"` 下单所需 API Key
 - `BINANCE_API_SECRET`：`mode="live"` 下单所需 API Secret
 - `BARK_NOTIFY_URL`：默认 Bark 推送地址
+- `OPENROUTER_API_KEY`：后端 AI 识别和 Telegram 机器人所需 OpenRouter Key
+- `OPENROUTER_MODEL`：后端 AI 识别模型，默认 `openai/gpt-5.3-codex`
+- `AI_DEFAULT_SYMBOL`：Telegram 默认 `symbol`，默认 `BTCUSDT`
+- `AI_DEFAULT_TIMEFRAME`：Telegram 默认 `timeframe`，默认 `1h`
+- `AI_DEFAULT_USD_AMOUNT`：Telegram 默认 `usd_amount`，默认 `100`
+- `AI_DEFAULT_MODE`：Telegram 默认 `mode`，默认 `simulate`
+- `AI_DEFAULT_CHART_TIMEZONE`：Telegram 默认 `chart_timezone`，默认 `UTC`
+- `AI_DEFAULT_LINE_HINT`：Telegram 默认 `target_line_hint`
+- `TELEGRAM_BOT_TOKEN`：Telegram 机器人 token
+- `TELEGRAM_ALLOWED_CHAT_IDS`：允许使用机器人的 chat id 白名单，逗号分隔；留空表示不限制
+- `TELEGRAM_POLL_TIMEOUT_SECONDS`：Telegram 长轮询超时，默认 `60`
 - `LOG_LEVEL`：日志级别，默认 `INFO`
 - `CORS_ALLOW_ORIGINS`：允许的跨域来源，默认 `*`
 
@@ -148,5 +200,8 @@ curl -sS 'http://127.0.0.1:8000/signal/watch/<job_id>'
 BINANCE_API_KEY=your_key \
 BINANCE_API_SECRET=your_secret \
 BINANCE_BASE_URL=https://api.binance.us \
+OPENROUTER_API_KEY=sk-or-... \
+TELEGRAM_BOT_TOKEN=123456:ABCDEF \
+TELEGRAM_ALLOWED_CHAT_IDS=123456789 \
 docker compose up -d --build
 ```
