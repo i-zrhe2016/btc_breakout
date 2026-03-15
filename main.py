@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -181,7 +181,7 @@ app.add_middleware(
 )
 
 
-JOB_STATUS = Literal["queued", "running", "completed", "failed"]
+JOB_STATUS = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 
 class TrendlineRequest(BaseModel):
@@ -345,12 +345,14 @@ class WatchJobState:
     payload: SignalWatchRequest
     status: JOB_STATUS
     created_ts: int
+    owner_chat_id: Optional[int] = None
     started_ts: Optional[int] = None
     ended_ts: Optional[int] = None
     checks_run: int = 0
     last_snapshot: Optional[SignalCheckSnapshot] = None
     error: Optional[str] = None
     result: Optional[SignalWatchResult] = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 @dataclass
@@ -359,6 +361,16 @@ class TelegramPendingConfirmation:
     created_ts: int
     result: dict[str, Any]
     payload: SignalWatchRequest
+
+
+@dataclass
+class WatchJobCancelSummary:
+    queued_job_ids: list[str]
+    running_job_ids: list[str]
+
+
+class WatchJobCancelled(Exception):
+    pass
 
 
 WATCH_JOBS: dict[str, WatchJobState] = {}
@@ -1854,6 +1866,7 @@ def decide_order(payload: TrendlineRequest) -> OrderDecision:
 def watch_signal(
     payload: SignalWatchRequest,
     on_snapshot: Optional[Callable[[SignalCheckSnapshot], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> SignalWatchResult:
     logger.info(
         "Signal watch started: symbol=%s interval_seconds=%s max_checks=%s stop_on_breakout=%s",
@@ -1869,11 +1882,13 @@ def watch_signal(
 
     i = 0
     while True:
+        ensure_watch_not_cancelled(cancel_event, reason="watch job cancelled by user")
         if payload.max_checks is not None and i >= payload.max_checks:
             break
 
         check_payload = payload.model_copy(update={"current_ts": None, "current_price": None})
         decision = decide_order(check_payload)
+        ensure_watch_not_cancelled(cancel_event, reason="watch job cancelled by user")
         snapshot = SignalCheckSnapshot(
             check_index=i + 1,
             current_ts=decision.current_ts,
@@ -1901,6 +1916,7 @@ def watch_signal(
         if on_snapshot is not None:
             on_snapshot(snapshot)
 
+        ensure_watch_not_cancelled(cancel_event, reason="watch job cancelled by user")
         if decision.action in ("BUY", "SELL"):
             breakout_action = decision.action
             logger.info(
@@ -1920,7 +1936,10 @@ def watch_signal(
         i += 1
         if payload.max_checks is None or i < payload.max_checks:
             logger.debug("Sleeping before next check: interval_seconds=%s", payload.interval_seconds)
-            time.sleep(payload.interval_seconds)
+            if cancel_event is not None and cancel_event.wait(payload.interval_seconds):
+                raise WatchJobCancelled("watch job cancelled by user")
+            if cancel_event is None:
+                time.sleep(payload.interval_seconds)
 
     ended_ts = int(time.time() * 1000)
     last_action: Literal["BUY", "SELL", "NONE"] = snapshots[-1].action if snapshots else "NONE"
@@ -2117,6 +2136,7 @@ def build_telegram_help_text(inputs: AiRecognitionInputs) -> str:
             "/last 查看最近一次识别结果",
             "/confirm 提交当前待确认 payload",
             "/cancel 取消当前待确认 payload",
+            "/cancelall 取消当前 chat 创建的所有监控任务，并清掉待确认 payload",
             "",
             "当前默认参数：",
             build_ai_config_summary(inputs),
@@ -2478,10 +2498,47 @@ def submit_telegram_pending_confirmation(
     if pending is None:
         raise ValueError("当前没有匹配的待确认 payload。")
     try:
-        return enqueue_signal_watch(pending.payload)
+        return enqueue_signal_watch(pending.payload, owner_chat_id=chat_id)
     except Exception:
         restore_chat_pending_confirmation(chat_id, pending)
         raise
+
+
+def cancel_watch_jobs_for_chat(
+    chat_id: int,
+    *,
+    reason: Optional[str] = None,
+) -> WatchJobCancelSummary:
+    cancel_reason = str(reason or f"Cancelled by Telegram chat {chat_id}")
+    queued_job_ids: list[str] = []
+    running_job_ids: list[str] = []
+
+    with WATCH_JOBS_LOCK:
+        for job_id, job in WATCH_JOBS.items():
+            if job.owner_chat_id != chat_id:
+                continue
+            if job.status == "queued":
+                if job.cancel_event.is_set():
+                    continue
+                job.cancel_event.set()
+                job.status = "cancelled"
+                job.ended_ts = int(time.time() * 1000)
+                job.error = cancel_reason
+                queued_job_ids.append(job_id)
+                logger.info("Queued watch job cancelled: job_id=%s owner_chat_id=%s", job_id, chat_id)
+                continue
+            if job.status == "running":
+                if job.cancel_event.is_set():
+                    continue
+                job.cancel_event.set()
+                job.error = cancel_reason
+                running_job_ids.append(job_id)
+                logger.info("Running watch job cancellation requested: job_id=%s owner_chat_id=%s", job_id, chat_id)
+
+    return WatchJobCancelSummary(
+        queued_job_ids=queued_job_ids,
+        running_job_ids=running_job_ids,
+    )
 
 
 def handle_telegram_command(token: str, message: dict[str, Any]) -> None:
@@ -2555,6 +2612,32 @@ def handle_telegram_command(token: str, message: dict[str, Any]) -> None:
             f"已取消待确认请求 request_id={pending.request_id}。",
             reply_to_message_id=message_id,
         )
+        return
+
+    if command == "/cancelall":
+        pending = take_chat_pending_confirmation(chat_id)
+        cancelled = cancel_watch_jobs_for_chat(chat_id)
+        if pending is None and not cancelled.queued_job_ids and not cancelled.running_job_ids:
+            telegram_send_message(token, chat_id, "当前没有可取消的待确认请求或监控任务。", reply_to_message_id=message_id)
+            return
+
+        lines: list[str] = []
+        if pending is not None:
+            lines.append(f"已清除待确认请求 request_id={pending.request_id}。")
+        if cancelled.queued_job_ids:
+            lines.append(
+                "已取消未启动监控任务："
+                + ", ".join(cancelled.queued_job_ids)
+                + "。"
+            )
+        if cancelled.running_job_ids:
+            lines.append(
+                "已向运行中监控任务发送取消请求："
+                + ", ".join(cancelled.running_job_ids)
+                + "。"
+            )
+            lines.append("运行中的任务会在本轮检查结束或等待间隔中尽快停止，并显示为 cancelled。")
+        telegram_send_message(token, chat_id, "\n".join(lines), reply_to_message_id=message_id)
         return
 
     if command == "/config":
@@ -2836,15 +2919,25 @@ def on_shutdown() -> None:
     TELEGRAM_BOT_STOP_EVENT.set()
 
 
-def set_job_running(job_id: str) -> Optional[SignalWatchRequest]:
+def set_job_running(job_id: str) -> Optional[tuple[SignalWatchRequest, threading.Event]]:
     with WATCH_JOBS_LOCK:
         job = WATCH_JOBS.get(job_id)
         if job is None:
             return None
+        if job.status == "cancelled" or job.cancel_event.is_set():
+            if job.status != "cancelled":
+                job.status = "cancelled"
+                job.ended_ts = int(time.time() * 1000)
+                job.error = job.error or "watch job cancelled before start"
+            logger.info("Job start skipped because it was already cancelled: job_id=%s", job_id)
+            return None
+        if job.status != "queued":
+            logger.warning("Job start skipped because status is unexpected: job_id=%s status=%s", job_id, job.status)
+            return None
         job.status = "running"
         job.started_ts = int(time.time() * 1000)
         logger.info("Job state updated: job_id=%s status=running", job_id)
-        return job.payload.model_copy(deep=True)
+        return job.payload.model_copy(deep=True), job.cancel_event
 
 
 def update_job_snapshot(job_id: str, snapshot: SignalCheckSnapshot) -> None:
@@ -2886,15 +2979,38 @@ def set_job_failed(job_id: str, error: str) -> None:
         logger.error("Job state updated: job_id=%s status=failed error=%s", job_id, error)
 
 
+def set_job_cancelled(job_id: str, reason: str) -> None:
+    with WATCH_JOBS_LOCK:
+        job = WATCH_JOBS.get(job_id)
+        if job is None:
+            return
+        job.status = "cancelled"
+        job.ended_ts = int(time.time() * 1000)
+        job.error = reason
+        logger.info("Job state updated: job_id=%s status=cancelled reason=%s", job_id, reason)
+
+
+def ensure_watch_not_cancelled(cancel_event: Optional[threading.Event], *, reason: str) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise WatchJobCancelled(reason)
+
+
 def run_watch_job(job_id: str) -> None:
     logger.info("Background watch job started: job_id=%s", job_id)
-    payload = set_job_running(job_id)
-    if payload is None:
-        logger.warning("Background watch job skipped: job_id=%s not found", job_id)
+    execution = set_job_running(job_id)
+    if execution is None:
+        logger.info("Background watch job skipped: job_id=%s", job_id)
         return
+    payload, cancel_event = execution
     try:
-        result = watch_signal(payload, on_snapshot=lambda s: update_job_snapshot(job_id, s))
+        result = watch_signal(
+            payload,
+            on_snapshot=lambda s: update_job_snapshot(job_id, s),
+            cancel_event=cancel_event,
+        )
         set_job_completed(job_id, result)
+    except WatchJobCancelled as exc:
+        set_job_cancelled(job_id, str(exc))
     except Exception as e:
         logger.exception("Background watch job crashed: job_id=%s", job_id)
         set_job_failed(job_id, str(e))
@@ -2905,7 +3021,11 @@ def validate_signal_watch_request(payload: SignalWatchRequest) -> None:
         raise ValueError("For unlimited monitoring, stop_on_breakout must be true")
 
 
-def enqueue_signal_watch(payload: SignalWatchRequest) -> SignalWatchJobAccepted:
+def enqueue_signal_watch(
+    payload: SignalWatchRequest,
+    *,
+    owner_chat_id: Optional[int] = None,
+) -> SignalWatchJobAccepted:
     validate_signal_watch_request(payload)
     job_id = uuid.uuid4().hex
     created_ts = int(time.time() * 1000)
@@ -2915,6 +3035,7 @@ def enqueue_signal_watch(payload: SignalWatchRequest) -> SignalWatchJobAccepted:
             payload=payload.model_copy(deep=True),
             status="queued",
             created_ts=created_ts,
+            owner_chat_id=owner_chat_id,
         )
 
     thread = threading.Thread(target=run_watch_job, args=(job_id,), daemon=True)

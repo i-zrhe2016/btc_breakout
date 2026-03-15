@@ -153,6 +153,7 @@ curl -sS -X POST 'http://127.0.0.1:8000/ai/recognize' \
 - `/last`
 - `/confirm`
 - `/cancel`
+- `/cancelall`
 
 图片 caption 或 `/config` 支持的参数：
 
@@ -172,6 +173,7 @@ target_line_hint=蓝色下降压力线
 - 当识别出完整 `api_payload` 时，机器人会先回一张重画后的趋势线预览图和待确认参数
 - 只有在你点击“确认提交”或发送 `/confirm` 后，机器人才会真正提交到 `/signal/watch`
 - 如果要放弃当前待确认结果，可以发送 `/cancel`
+- 如果要停止当前 chat 通过 Telegram 创建的所有监控任务，并同时清掉待确认结果，可以发送 `/cancelall`
 - 建议用原图文件发送截图，避免 Telegram 压缩
 
 ## `POST /signal/watch`
@@ -252,6 +254,7 @@ curl -sS 'http://127.0.0.1:8000/signal/watch/<job_id>'
 - `running`
 - `completed`
 - `failed`
+- `cancelled`
 
 响应里会包含：
 
