@@ -4,6 +4,7 @@ import base64
 import json
 import hashlib
 import hmac
+import io
 import logging
 import math
 import os
@@ -23,6 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -351,10 +353,19 @@ class WatchJobState:
     result: Optional[SignalWatchResult] = None
 
 
+@dataclass
+class TelegramPendingConfirmation:
+    request_id: str
+    created_ts: int
+    result: dict[str, Any]
+    payload: SignalWatchRequest
+
+
 WATCH_JOBS: dict[str, WatchJobState] = {}
 WATCH_JOBS_LOCK = threading.Lock()
 TELEGRAM_CHAT_SETTINGS: dict[int, AiRecognitionInputs] = {}
 TELEGRAM_LAST_RESULTS: dict[int, dict[str, Any]] = {}
+TELEGRAM_PENDING_CONFIRMATIONS: dict[int, TelegramPendingConfirmation] = {}
 TELEGRAM_STATE_LOCK = threading.Lock()
 TELEGRAM_BOT_THREAD: Optional[threading.Thread] = None
 TELEGRAM_BOT_STOP_EVENT = threading.Event()
@@ -1208,12 +1219,278 @@ def finalize_recognized_payload(
     )
 
 
+def load_preview_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    font_candidates = [
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in font_candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def format_preview_price(value: Optional[float]) -> str:
+    if value is None:
+        return "null"
+    absolute = abs(value)
+    if absolute >= 1000:
+        return f"{value:,.2f}"
+    if absolute >= 1:
+        return f"{value:.2f}"
+    return f"{value:.4f}"
+
+
+def find_nearest_candle_index(candles: list[dict[str, Any]], ts: Optional[int]) -> Optional[int]:
+    if not candles or not isinstance(ts, int):
+        return None
+    best_idx = 0
+    best_gap = abs(int(candles[0]["ts"]) - ts)
+    for idx, candle in enumerate(candles[1:], start=1):
+        gap = abs(int(candle["ts"]) - ts)
+        if gap < best_gap:
+            best_idx = idx
+            best_gap = gap
+    return best_idx
+
+
+def select_preview_window(
+    candles: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    if not candles:
+        return [], 0
+
+    anchor_indices = [
+        idx
+        for idx in [
+            find_nearest_candle_index(candles, payload.get("ts1")),
+            find_nearest_candle_index(candles, payload.get("ts2")),
+        ]
+        if idx is not None
+    ]
+
+    if len(anchor_indices) >= 2:
+        left = min(anchor_indices)
+        right = max(anchor_indices)
+        span = max(12, right - left + 1)
+        padding = max(24, int(span * 0.75))
+        start = max(0, left - padding)
+        end = min(len(candles) - 1, right + padding)
+    else:
+        end = len(candles) - 1
+        start = max(0, end - 179)
+
+    minimum_window = min(len(candles), 120)
+    current_window = end - start + 1
+    if current_window < minimum_window:
+        deficit = minimum_window - current_window
+        start = max(0, start - deficit // 2)
+        end = min(len(candles) - 1, end + deficit - deficit // 2)
+        while end - start + 1 < minimum_window and start > 0:
+            start -= 1
+        while end - start + 1 < minimum_window and end < len(candles) - 1:
+            end += 1
+
+    return candles[start : end + 1], start
+
+
+def draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[float, float, float, float],
+    text: str,
+    *,
+    font: ImageFont.ImageFont,
+    fill: str,
+) -> None:
+    left, top, right, bottom = box
+    text_box = draw.textbbox((0, 0), text, font=font)
+    text_width = text_box[2] - text_box[0]
+    text_height = text_box[3] - text_box[1]
+    x = left + (right - left - text_width) / 2
+    y = top + (bottom - top - text_height) / 2
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def render_trendline_preview_png(
+    candles: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> bytes:
+    payload = result.get("api_payload") if isinstance(result.get("api_payload"), dict) else None
+    if not isinstance(payload, dict):
+        raise ValueError("缺少 api_payload，无法生成预览图")
+    validate_ai_payload(payload)
+
+    visible_candles, _ = select_preview_window(candles, payload)
+    if len(visible_candles) < 2:
+        raise ValueError("K 线数量不足，无法生成预览图")
+
+    line = compute_trendline(payload["ts1"], payload["price1"], payload["ts2"], payload["price2"])
+    projected_prices = [line.price_at(int(candle["ts"])) for candle in visible_candles]
+    price_min = min(
+        min(float(candle["low"]) for candle in visible_candles),
+        min(projected_prices),
+        float(payload["price1"]),
+        float(payload["price2"]),
+    )
+    price_max = max(
+        max(float(candle["high"]) for candle in visible_candles),
+        max(projected_prices),
+        float(payload["price1"]),
+        float(payload["price2"]),
+    )
+    if not math.isfinite(price_min) or not math.isfinite(price_max):
+        raise ValueError("价格范围无效，无法生成预览图")
+    if price_max <= price_min:
+        price_max += 1.0
+        price_min -= 1.0
+    padding = (price_max - price_min) * 0.12
+    price_min -= padding
+    price_max += padding
+
+    width, height = 1400, 900
+    header_h = 110
+    footer_h = 86
+    left_pad, right_pad = 108, 42
+    top_pad, bottom_pad = header_h, footer_h
+    chart_left = left_pad
+    chart_top = top_pad
+    chart_right = width - right_pad
+    chart_bottom = height - bottom_pad
+    chart_width = chart_right - chart_left
+    chart_height = chart_bottom - chart_top
+
+    image = Image.new("RGB", (width, height), "#f4efe6")
+    draw = ImageDraw.Draw(image)
+    title_font = load_preview_font(34, bold=True)
+    meta_font = load_preview_font(18)
+    small_font = load_preview_font(16)
+    tiny_font = load_preview_font(14)
+
+    draw.rounded_rectangle((20, 18, width - 20, height - 18), radius=28, fill="#fbf8f2", outline="#e1d8ca", width=2)
+    draw.rounded_rectangle((chart_left, chart_top, chart_right, chart_bottom), radius=24, fill="#fffdf9", outline="#eadfce", width=2)
+
+    draw.text((36, 28), f"{payload['symbol']} {result.get('timeframe') or 'unknown'} trend preview", font=title_font, fill="#1f2a37")
+    draw.text(
+        (38, 70),
+        f"{result.get('trendline_kind') or 'unknown'} | mode={payload.get('mode') or 'simulate'} | usd_amount={payload.get('usd_amount')}",
+        font=meta_font,
+        fill="#5b6471",
+    )
+
+    def price_to_y(price: float) -> float:
+        return chart_bottom - (price - price_min) / (price_max - price_min) * chart_height
+
+    count = len(visible_candles)
+    x_step = chart_width / max(1, count - 1)
+    candle_body_w = max(4, min(10, int(x_step * 0.72)))
+
+    for grid_idx in range(6):
+        ratio = grid_idx / 5
+        y = chart_top + chart_height * ratio
+        price = price_max - (price_max - price_min) * ratio
+        draw.line((chart_left, y, chart_right, y), fill="#ece3d6", width=1)
+        label = format_preview_price(price)
+        label_box = draw.textbbox((0, 0), label, font=small_font)
+        draw.text(
+            (chart_left - (label_box[2] - label_box[0]) - 12, y - 8),
+            label,
+            font=small_font,
+            fill="#6a7280",
+        )
+
+    time_zone = result.get("chart_timezone") or "UTC"
+    for tick_idx in range(5):
+        ratio = tick_idx / 4
+        candle_idx = min(count - 1, round((count - 1) * ratio))
+        candle = visible_candles[candle_idx]
+        x = chart_left + candle_idx * x_step
+        draw.line((x, chart_top, x, chart_bottom), fill="#f2ece1", width=1)
+        parts = candle_parts_in_time_zone(int(candle["ts"]), time_zone)
+        label = f"{parts['month']:02d}-{parts['day']:02d} {parts['hour']:02d}:{parts['minute']:02d}"
+        text_box = draw.textbbox((0, 0), label, font=tiny_font)
+        draw.text((x - (text_box[2] - text_box[0]) / 2, chart_bottom + 12), label, font=tiny_font, fill="#7b8492")
+
+    for idx, candle in enumerate(visible_candles):
+        x = chart_left + idx * x_step
+        open_y = price_to_y(float(candle["open"]))
+        close_y = price_to_y(float(candle["close"]))
+        high_y = price_to_y(float(candle["high"]))
+        low_y = price_to_y(float(candle["low"]))
+        bullish = float(candle["close"]) >= float(candle["open"])
+        body_fill = "#1f8f62" if bullish else "#cf5b4e"
+        wick_fill = "#54606f"
+        draw.line((x, high_y, x, low_y), fill=wick_fill, width=2)
+        body_top = min(open_y, close_y)
+        body_bottom = max(open_y, close_y)
+        if abs(body_bottom - body_top) < 2:
+            body_bottom = body_top + 2
+        draw.rounded_rectangle(
+            (x - candle_body_w / 2, body_top, x + candle_body_w / 2, body_bottom),
+            radius=2,
+            fill=body_fill,
+            outline=body_fill,
+        )
+
+    line_start_x = chart_left
+    line_end_x = chart_right
+    line_start_y = price_to_y(line.price_at(int(visible_candles[0]["ts"])))
+    line_end_y = price_to_y(line.price_at(int(visible_candles[-1]["ts"])))
+    draw.line((line_start_x, line_start_y, line_end_x, line_end_y), fill="#1f6feb", width=4)
+
+    anchor_items = [
+        ("p1", int(payload["ts1"]), float(payload["price1"]), "#ffb100"),
+        ("p2", int(payload["ts2"]), float(payload["price2"]), "#ff6a3d"),
+    ]
+    for label, ts, price, color in anchor_items:
+        local_idx = find_nearest_candle_index(visible_candles, ts)
+        if local_idx is None:
+            continue
+        x = chart_left + local_idx * x_step
+        y = price_to_y(price)
+        radius = 8
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color, outline="#fffdf9", width=3)
+        tag_box = (x - 22, y - 34, x + 22, y - 10)
+        draw.rounded_rectangle(tag_box, radius=8, fill="#1f2a37")
+        draw_centered_text(draw, tag_box, label, font=tiny_font, fill="#ffffff")
+
+    footer_text = "Confirm the redrawn line in Telegram before the bot submits /signal/watch."
+    draw.text((38, height - 52), footer_text, font=small_font, fill="#5f6774")
+    draw.text(
+        (38, height - 30),
+        f"p1={format_anchor_timestamp(payload['ts1'], time_zone)} @ {format_preview_price(payload['price1'])} | "
+        f"p2={format_anchor_timestamp(payload['ts2'], time_zone)} @ {format_preview_price(payload['price2'])}",
+        font=tiny_font,
+        fill="#7a8190",
+    )
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
 def recognize_trendline_from_image(
     image_bytes: bytes,
     inputs: AiRecognitionInputs,
     *,
     image_content_type: str = "image/jpeg",
 ) -> dict[str, Any]:
+    result, _ = recognize_trendline_from_image_with_candles(
+        image_bytes,
+        inputs,
+        image_content_type=image_content_type,
+    )
+    return result
+
+
+def recognize_trendline_from_image_with_candles(
+    image_bytes: bytes,
+    inputs: AiRecognitionInputs,
+    *,
+    image_content_type: str = "image/jpeg",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     api_key = str(os.getenv("OPENROUTER_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY 未配置")
@@ -1265,7 +1542,7 @@ def recognize_trendline_from_image(
         if not isinstance(parsed, dict):
             parsed = extract_json_object(message_content_to_text(message.get("content")))
     normalized = normalize_ai_result(parsed, inputs)
-    return finalize_recognized_payload(normalized, candles, inputs)
+    return finalize_recognized_payload(normalized, candles, inputs), candles
 
 def compute_trendline(ts1: int, price1: float, ts2: int, price2: float) -> Trendline:
     slope = (price2 - price1) / (ts2 - ts1)
@@ -1739,6 +2016,7 @@ def reset_chat_ai_inputs(chat_id: int) -> AiRecognitionInputs:
     with TELEGRAM_STATE_LOCK:
         TELEGRAM_CHAT_SETTINGS.pop(chat_id, None)
         TELEGRAM_LAST_RESULTS.pop(chat_id, None)
+        TELEGRAM_PENDING_CONFIRMATIONS.pop(chat_id, None)
     return inputs
 
 
@@ -1751,6 +2029,57 @@ def get_chat_last_result(chat_id: int) -> Optional[dict[str, Any]]:
     with TELEGRAM_STATE_LOCK:
         result = TELEGRAM_LAST_RESULTS.get(chat_id)
         return None if result is None else json.loads(json.dumps(result, ensure_ascii=False))
+
+
+def set_chat_pending_confirmation(chat_id: int, pending: TelegramPendingConfirmation) -> None:
+    with TELEGRAM_STATE_LOCK:
+        TELEGRAM_PENDING_CONFIRMATIONS[chat_id] = TelegramPendingConfirmation(
+            request_id=pending.request_id,
+            created_ts=int(pending.created_ts),
+            result=json.loads(json.dumps(pending.result, ensure_ascii=False)),
+            payload=pending.payload.model_copy(deep=True),
+        )
+
+
+def restore_chat_pending_confirmation(chat_id: int, pending: TelegramPendingConfirmation) -> None:
+    set_chat_pending_confirmation(chat_id, pending)
+
+
+def get_chat_pending_confirmation(chat_id: int) -> Optional[TelegramPendingConfirmation]:
+    with TELEGRAM_STATE_LOCK:
+        pending = TELEGRAM_PENDING_CONFIRMATIONS.get(chat_id)
+        if pending is None:
+            return None
+        return TelegramPendingConfirmation(
+            request_id=pending.request_id,
+            created_ts=int(pending.created_ts),
+            result=json.loads(json.dumps(pending.result, ensure_ascii=False)),
+            payload=pending.payload.model_copy(deep=True),
+        )
+
+
+def take_chat_pending_confirmation(
+    chat_id: int,
+    request_id: Optional[str] = None,
+) -> Optional[TelegramPendingConfirmation]:
+    with TELEGRAM_STATE_LOCK:
+        pending = TELEGRAM_PENDING_CONFIRMATIONS.get(chat_id)
+        if pending is None:
+            return None
+        if request_id is not None and pending.request_id != request_id:
+            return None
+        TELEGRAM_PENDING_CONFIRMATIONS.pop(chat_id, None)
+        return TelegramPendingConfirmation(
+            request_id=pending.request_id,
+            created_ts=int(pending.created_ts),
+            result=json.loads(json.dumps(pending.result, ensure_ascii=False)),
+            payload=pending.payload.model_copy(deep=True),
+        )
+
+
+def clear_chat_pending_confirmation(chat_id: int) -> None:
+    with TELEGRAM_STATE_LOCK:
+        TELEGRAM_PENDING_CONFIRMATIONS.pop(chat_id, None)
 
 
 def build_ai_config_summary(inputs: AiRecognitionInputs) -> str:
@@ -1769,7 +2098,7 @@ def build_ai_config_summary(inputs: AiRecognitionInputs) -> str:
 def build_telegram_help_text(inputs: AiRecognitionInputs) -> str:
     return "\n".join(
         [
-            "发送一张 TradingView 截图给机器人，我会按 1.html 相同的 AI 识别逻辑返回趋势线 payload。",
+            "发送一张 TradingView 截图给机器人，我会先解析趋势线参数、回画一张预览图，再等你确认后提交到 /signal/watch。",
             "",
             "建议把图片作为原图文件发送，清晰度更稳定。",
             "",
@@ -1786,6 +2115,8 @@ def build_telegram_help_text(inputs: AiRecognitionInputs) -> str:
             "/showconfig 查看当前默认参数",
             "/resetconfig 恢复默认参数",
             "/last 查看最近一次识别结果",
+            "/confirm 提交当前待确认 payload",
+            "/cancel 取消当前待确认 payload",
             "",
             "当前默认参数：",
             build_ai_config_summary(inputs),
@@ -1889,6 +2220,55 @@ def format_telegram_ai_result(result: dict[str, Any]) -> str:
     return truncate_telegram_text("\n".join(lines))
 
 
+def format_telegram_confirmation_message(result: dict[str, Any], pending: TelegramPendingConfirmation) -> str:
+    payload = result.get("api_payload") if isinstance(result.get("api_payload"), dict) else {}
+    time_zone = result.get("chart_timezone") or "UTC"
+    lines = [
+        "已解析出 API 参数，等待你确认后再提交到 /signal/watch。",
+        f"request_id={pending.request_id}",
+        f"confidence={float(result.get('confidence') or 0):.3f}",
+        f"trendline_kind={result.get('trendline_kind') or 'unknown'}",
+        f"symbol={payload.get('symbol') or result.get('symbol') or 'null'}",
+        f"timeframe={result.get('timeframe') or 'null'}",
+        f"chart_timezone={time_zone}",
+        f"mode={payload.get('mode') or 'simulate'}",
+        f"usd_amount={payload.get('usd_amount')}",
+    ]
+    if isinstance(payload.get("ts1"), int) and isinstance(payload.get("ts2"), int):
+        lines.extend(
+            [
+                f"p1={format_anchor_timestamp(payload['ts1'], time_zone)} @ {format_preview_price(to_finite_number(payload.get('price1')))}",
+                f"p2={format_anchor_timestamp(payload['ts2'], time_zone)} @ {format_preview_price(to_finite_number(payload.get('price2')))}",
+            ]
+        )
+    lines.extend(["", "payload:", json.dumps(payload, ensure_ascii=False, indent=2)])
+    if result.get("notes"):
+        lines.extend(["", "notes:", str(result["notes"])])
+    if payload.get("mode") == "live":
+        lines.extend(["", "警告：当前 mode=live，后续监控触发时会尝试真实下单。"])
+    lines.extend(["", "点击下方按钮，或发送 /confirm 提交、/cancel 取消。"])
+    return truncate_telegram_text("\n".join(lines))
+
+
+def format_telegram_pending_status(pending: TelegramPendingConfirmation) -> str:
+    created = datetime.fromtimestamp(pending.created_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        f"当前有待确认请求：request_id={pending.request_id}，created_at={created}。\n"
+        "发送 /confirm 提交，或发送 /cancel 取消。"
+    )
+
+
+def build_telegram_confirmation_reply_markup(request_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "确认提交", "callback_data": f"tgok:{request_id}"},
+                {"text": "取消", "callback_data": f"tgcancel:{request_id}"},
+            ]
+        ]
+    }
+
+
 def telegram_api_call(token: str, method: str, payload: Optional[dict[str, Any]] = None, timeout: int = 30) -> Any:
     url = f"{TELEGRAM_API_BASE_URL}/bot{token}/{method}"
     response = request_json(url, method="POST", payload=payload or {}, timeout=timeout)
@@ -1899,12 +2279,73 @@ def telegram_api_call(token: str, method: str, payload: Optional[dict[str, Any]]
     return response.get("result")
 
 
+def telegram_api_multipart_call(
+    token: str,
+    method: str,
+    *,
+    fields: dict[str, Any],
+    files: dict[str, tuple[str, bytes, str]],
+    timeout: int = 60,
+) -> Any:
+    boundary = f"----trendlinebot{uuid.uuid4().hex}"
+    body = bytearray()
+    for key, value in fields.items():
+        if value is None:
+            continue
+        encoded = str(value).encode("utf-8")
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(encoded)
+        body.extend(b"\r\n")
+    for key, (filename, content, content_type) in files.items():
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(
+            (
+                f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode("utf-8")
+        )
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+
+    url = f"{TELEGRAM_API_BASE_URL}/bot{token}/{method}"
+    req = Request(
+        url,
+        data=bytes(body),
+        method="POST",
+        headers={
+            "User-Agent": "trendline-api/0.1",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+    except HTTPError as exc:
+        body_text = ""
+        try:
+            body_text = exc.read().decode("utf-8", "ignore")
+        except Exception:
+            body_text = ""
+        detail = f"HTTP {exc.code} {exc.reason}"
+        if body_text:
+            detail = f"{detail}; body={body_text}"
+        raise RuntimeError(detail) from exc
+
+    response = json.loads(raw)
+    if not isinstance(response, dict) or not response.get("ok"):
+        raise RuntimeError(str(response.get("description") if isinstance(response, dict) else f"Telegram API {method} failed"))
+    return response.get("result")
+
+
 def telegram_send_message(
     token: str,
     chat_id: int,
     text: str,
     *,
     reply_to_message_id: Optional[int] = None,
+    reply_markup: Optional[dict[str, Any]] = None,
 ) -> None:
     payload: dict[str, Any] = {
         "chat_id": chat_id,
@@ -1914,7 +2355,36 @@ def telegram_send_message(
     if reply_to_message_id is not None:
         payload["reply_to_message_id"] = reply_to_message_id
         payload["allow_sending_without_reply"] = True
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     telegram_api_call(token, "sendMessage", payload=payload, timeout=30)
+
+
+def telegram_send_photo(
+    token: str,
+    chat_id: int,
+    photo_bytes: bytes,
+    *,
+    filename: str = "trend-preview.png",
+    caption: Optional[str] = None,
+    reply_to_message_id: Optional[int] = None,
+    reply_markup: Optional[dict[str, Any]] = None,
+) -> None:
+    fields: dict[str, Any] = {"chat_id": chat_id}
+    if caption:
+        fields["caption"] = caption[:1024]
+    if reply_to_message_id is not None:
+        fields["reply_to_message_id"] = reply_to_message_id
+        fields["allow_sending_without_reply"] = "true"
+    if reply_markup is not None:
+        fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    telegram_api_multipart_call(
+        token,
+        "sendPhoto",
+        fields=fields,
+        files={"photo": (filename, photo_bytes, "image/png")},
+        timeout=60,
+    )
 
 
 def telegram_send_chat_action(token: str, chat_id: int, action: str) -> None:
@@ -1922,6 +2392,28 @@ def telegram_send_chat_action(token: str, chat_id: int, action: str) -> None:
         telegram_api_call(token, "sendChatAction", {"chat_id": chat_id, "action": action}, timeout=15)
     except Exception:
         logger.debug("Failed to send Telegram chat action", exc_info=True)
+
+
+def telegram_answer_callback_query(token: str, callback_query_id: str, text: Optional[str]) -> None:
+    payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:180]
+    try:
+        telegram_api_call(token, "answerCallbackQuery", payload=payload, timeout=15)
+    except Exception:
+        logger.debug("Failed to answer Telegram callback query", exc_info=True)
+
+
+def telegram_clear_inline_keyboard(token: str, chat_id: int, message_id: int) -> None:
+    try:
+        telegram_api_call(
+            token,
+            "editMessageReplyMarkup",
+            payload={"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}},
+            timeout=15,
+        )
+    except Exception:
+        logger.debug("Failed to clear Telegram inline keyboard", exc_info=True)
 
 
 def guess_image_content_type(name: Optional[str], fallback: str = "image/jpeg") -> str:
@@ -1977,6 +2469,21 @@ def download_telegram_file(token: str, file_id: str, *, preferred_content_type: 
     return data, content_type
 
 
+def submit_telegram_pending_confirmation(
+    chat_id: int,
+    *,
+    request_id: Optional[str] = None,
+) -> SignalWatchJobAccepted:
+    pending = take_chat_pending_confirmation(chat_id, request_id=request_id)
+    if pending is None:
+        raise ValueError("当前没有匹配的待确认 payload。")
+    try:
+        return enqueue_signal_watch(pending.payload)
+    except Exception:
+        restore_chat_pending_confirmation(chat_id, pending)
+        raise
+
+
 def handle_telegram_command(token: str, message: dict[str, Any]) -> None:
     chat_id = int(message["chat"]["id"])
     message_id = int(message["message_id"])
@@ -2012,7 +2519,42 @@ def handle_telegram_command(token: str, message: dict[str, Any]) -> None:
         if last_result is None:
             telegram_send_message(token, chat_id, "还没有最近一次识别结果。", reply_to_message_id=message_id)
             return
-        telegram_send_message(token, chat_id, format_telegram_ai_result(last_result), reply_to_message_id=message_id)
+        text = format_telegram_ai_result(last_result)
+        pending = get_chat_pending_confirmation(chat_id)
+        if pending is not None:
+            text = truncate_telegram_text(text + "\n\n" + format_telegram_pending_status(pending))
+        telegram_send_message(token, chat_id, text, reply_to_message_id=message_id)
+        return
+
+    if command == "/confirm":
+        try:
+            accepted = submit_telegram_pending_confirmation(chat_id)
+        except ValueError as exc:
+            telegram_send_message(token, chat_id, str(exc), reply_to_message_id=message_id)
+            return
+        except Exception as exc:
+            logger.exception("Telegram confirmation submission failed: chat_id=%s", chat_id)
+            telegram_send_message(token, chat_id, f"提交失败：{exc}", reply_to_message_id=message_id)
+            return
+        telegram_send_message(
+            token,
+            chat_id,
+            f"已提交到 /signal/watch，job_id={accepted.job_id}，status={accepted.status}。",
+            reply_to_message_id=message_id,
+        )
+        return
+
+    if command == "/cancel":
+        pending = take_chat_pending_confirmation(chat_id)
+        if pending is None:
+            telegram_send_message(token, chat_id, "当前没有待取消的确认请求。", reply_to_message_id=message_id)
+            return
+        telegram_send_message(
+            token,
+            chat_id,
+            f"已取消待确认请求 request_id={pending.request_id}。",
+            reply_to_message_id=message_id,
+        )
         return
 
     if command == "/config":
@@ -2064,15 +2606,125 @@ def handle_telegram_image_message(token: str, message: dict[str, Any], image_fil
             str(image_file["file_id"]),
             preferred_content_type=str(image_file.get("content_type") or "image/jpeg"),
         )
-        result = recognize_trendline_from_image(image_bytes, inputs, image_content_type=content_type)
+        result, candles = recognize_trendline_from_image_with_candles(image_bytes, inputs, image_content_type=content_type)
         set_chat_last_result(chat_id, result)
+        clear_chat_pending_confirmation(chat_id)
+
+        if result.get("ready_for_api"):
+            payload = SignalWatchRequest(**(result.get("api_payload") or {}))
+            pending = TelegramPendingConfirmation(
+                request_id=uuid.uuid4().hex[:12],
+                created_ts=int(time.time() * 1000),
+                result=result,
+                payload=payload,
+            )
+            set_chat_pending_confirmation(chat_id, pending)
+
+            preview_sent = False
+            try:
+                preview_png = render_trendline_preview_png(candles, result)
+                telegram_send_chat_action(token, chat_id, "upload_photo")
+                telegram_send_photo(
+                    token,
+                    chat_id,
+                    preview_png,
+                    filename=f"{payload.symbol.lower()}-{inputs.timeframe}-preview.png",
+                    caption="已按解析参数回画趋势线，请核对下方 payload 后再确认提交。",
+                    reply_to_message_id=message_id,
+                )
+                preview_sent = True
+            except Exception:
+                logger.exception("Telegram trend preview render failed: chat_id=%s", chat_id)
+
+            summary = format_telegram_confirmation_message(result, pending)
+            if not preview_sent:
+                summary = truncate_telegram_text("趋势图预览生成失败，已仅返回参数确认信息。\n\n" + summary)
+            telegram_send_message(
+                token,
+                chat_id,
+                summary,
+                reply_to_message_id=message_id,
+                reply_markup=build_telegram_confirmation_reply_markup(pending.request_id),
+            )
+            return
+
         telegram_send_message(token, chat_id, format_telegram_ai_result(result), reply_to_message_id=message_id)
     except Exception as exc:
         logger.exception("Telegram image recognition failed: chat_id=%s", chat_id)
         telegram_send_message(token, chat_id, f"识别失败：{exc}", reply_to_message_id=message_id)
 
 
+def handle_telegram_callback_query(token: str, update: dict[str, Any]) -> None:
+    callback_query = update.get("callback_query")
+    if not isinstance(callback_query, dict):
+        return
+    callback_query_id = str(callback_query.get("id") or "")
+    data = str(callback_query.get("data") or "").strip()
+    message = callback_query.get("message")
+    if not isinstance(message, dict):
+        telegram_answer_callback_query(token, callback_query_id, "该按钮消息已不可用。")
+        return
+    chat = message.get("chat")
+    if not isinstance(chat, dict) or not isinstance(chat.get("id"), int):
+        telegram_answer_callback_query(token, callback_query_id, "无法识别当前会话。")
+        return
+
+    chat_id = int(chat["id"])
+    message_id = int(message.get("message_id") or 0)
+    if not is_allowed_telegram_chat(chat_id):
+        telegram_answer_callback_query(token, callback_query_id, "当前 chat_id 未被允许使用该机器人。")
+        return
+
+    if ":" not in data:
+        telegram_answer_callback_query(token, callback_query_id, "未知操作。")
+        return
+
+    action, request_id = data.split(":", 1)
+    if action == "tgok":
+        try:
+            accepted = submit_telegram_pending_confirmation(chat_id, request_id=request_id)
+        except ValueError as exc:
+            telegram_answer_callback_query(token, callback_query_id, str(exc))
+            return
+        except Exception as exc:
+            logger.exception("Telegram callback submission failed: chat_id=%s", chat_id)
+            telegram_answer_callback_query(token, callback_query_id, "提交失败")
+            telegram_send_message(token, chat_id, f"提交失败：{exc}", reply_to_message_id=message_id or None)
+            return
+
+        telegram_clear_inline_keyboard(token, chat_id, message_id)
+        telegram_answer_callback_query(token, callback_query_id, "已提交")
+        telegram_send_message(
+            token,
+            chat_id,
+            f"已提交到 /signal/watch，job_id={accepted.job_id}，status={accepted.status}。",
+            reply_to_message_id=message_id or None,
+        )
+        return
+
+    if action == "tgcancel":
+        pending = take_chat_pending_confirmation(chat_id, request_id=request_id)
+        if pending is None:
+            telegram_answer_callback_query(token, callback_query_id, "当前没有匹配的待确认 payload。")
+            return
+        telegram_clear_inline_keyboard(token, chat_id, message_id)
+        telegram_answer_callback_query(token, callback_query_id, "已取消")
+        telegram_send_message(
+            token,
+            chat_id,
+            f"已取消待确认请求 request_id={pending.request_id}。",
+            reply_to_message_id=message_id or None,
+        )
+        return
+
+    telegram_answer_callback_query(token, callback_query_id, "未知操作。")
+
+
 def handle_telegram_message(token: str, update: dict[str, Any]) -> None:
+    if isinstance(update.get("callback_query"), dict):
+        handle_telegram_callback_query(token, update)
+        return
+
     message = update.get("message") or update.get("edited_message")
     if not isinstance(message, dict):
         return
@@ -2118,7 +2770,7 @@ def telegram_bot_loop(token: str) -> None:
     while not TELEGRAM_BOT_STOP_EVENT.is_set():
         payload: dict[str, Any] = {
             "timeout": poll_timeout,
-            "allowed_updates": ["message", "edited_message"],
+            "allowed_updates": ["message", "edited_message", "callback_query"],
         }
         if offset is not None:
             payload["offset"] = offset
@@ -2248,6 +2900,36 @@ def run_watch_job(job_id: str) -> None:
         set_job_failed(job_id, str(e))
 
 
+def validate_signal_watch_request(payload: SignalWatchRequest) -> None:
+    if payload.max_checks is None and not payload.stop_on_breakout:
+        raise ValueError("For unlimited monitoring, stop_on_breakout must be true")
+
+
+def enqueue_signal_watch(payload: SignalWatchRequest) -> SignalWatchJobAccepted:
+    validate_signal_watch_request(payload)
+    job_id = uuid.uuid4().hex
+    created_ts = int(time.time() * 1000)
+    with WATCH_JOBS_LOCK:
+        WATCH_JOBS[job_id] = WatchJobState(
+            job_id=job_id,
+            payload=payload.model_copy(deep=True),
+            status="queued",
+            created_ts=created_ts,
+        )
+
+    thread = threading.Thread(target=run_watch_job, args=(job_id,), daemon=True)
+    thread.start()
+    logger.info(
+        "Watch job queued: job_id=%s symbol=%s interval_seconds=%s max_checks=%s stop_on_breakout=%s",
+        job_id,
+        payload.symbol,
+        payload.interval_seconds,
+        payload.max_checks,
+        payload.stop_on_breakout,
+    )
+    return SignalWatchJobAccepted(job_id=job_id, status="queued", created_ts=created_ts)
+
+
 @app.get("/healthz", include_in_schema=False)
 @app.head("/healthz", include_in_schema=False)
 def healthz() -> Response:
@@ -2286,33 +2968,10 @@ def ai_recognize(payload: AiRecognitionRequest):
 
 @app.post("/signal/watch", response_model=SignalWatchJobAccepted)
 def signal_watch(payload: SignalWatchRequest):
-    if payload.max_checks is None and not payload.stop_on_breakout:
-        raise HTTPException(
-            status_code=400,
-            detail="For unlimited monitoring, stop_on_breakout must be true",
-        )
-    job_id = uuid.uuid4().hex
-    created_ts = int(time.time() * 1000)
-    with WATCH_JOBS_LOCK:
-        WATCH_JOBS[job_id] = WatchJobState(
-            job_id=job_id,
-            payload=payload.model_copy(deep=True),
-            status="queued",
-            created_ts=created_ts,
-        )
-
-    thread = threading.Thread(target=run_watch_job, args=(job_id,), daemon=True)
-    thread.start()
-    logger.info(
-        "Watch job queued: job_id=%s symbol=%s interval_seconds=%s max_checks=%s stop_on_breakout=%s",
-        job_id,
-        payload.symbol,
-        payload.interval_seconds,
-        payload.max_checks,
-        payload.stop_on_breakout,
-    )
-
-    return SignalWatchJobAccepted(job_id=job_id, status="queued", created_ts=created_ts)
+    try:
+        return enqueue_signal_watch(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/signal/watch/{job_id}", response_model=SignalWatchJobStatus)

@@ -151,6 +151,8 @@ curl -sS -X POST 'http://127.0.0.1:8000/ai/recognize' \
 - `/showconfig`
 - `/resetconfig`
 - `/last`
+- `/confirm`
+- `/cancel`
 
 图片 caption 或 `/config` 支持的参数：
 
@@ -167,7 +169,9 @@ target_line_hint=蓝色下降压力线
 
 - `/config` 既支持多行 `key=value`，也支持 JSON 对象
 - 机器人会复用后端同一套 OpenRouter prompt、日期恢复和最近 K 线吸附逻辑
-- 返回结果里的 `api_payload` 可以直接提交到 `/signal/watch`
+- 当识别出完整 `api_payload` 时，机器人会先回一张重画后的趋势线预览图和待确认参数
+- 只有在你点击“确认提交”或发送 `/confirm` 后，机器人才会真正提交到 `/signal/watch`
+- 如果要放弃当前待确认结果，可以发送 `/cancel`
 - 建议用原图文件发送截图，避免 Telegram 压缩
 
 ## `POST /signal/watch`
@@ -305,4 +309,3 @@ docker compose up -d --build
 - Telegram 当前 chat 的默认参数和最近一次识别结果也只保存在内存里
 - 后台监控依赖进程内线程，不适合多副本共享状态；如果做多实例部署，查询任务状态必须回到原始实例
 - 当前代码里存在内置的 `DEFAULT_BARK_NOTIFY_URL` fallback；如果请求里没传 `notify_url`，环境变量也为空，仍会回退到代码默认值
-
