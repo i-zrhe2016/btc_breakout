@@ -350,18 +350,12 @@
       <h3>OpenRouter 截图识别</h3>
 
       <div class="hint">
-        浏览器直连 OpenRouter 会把 API Key 暴露在本机页面环境里，只适合本地调试。正式部署建议改成后端代理。
+        页面会把截图提交给当前后端，再由后端读取 `.env` 里的 <code>OPENROUTER_API_KEY</code> 和 <code>OPENROUTER_MODEL</code> 调用 OpenRouter。
       </div>
 
       <div class="hint">
         当前默认使用 <code>openai/gpt-5.3-codex</code>，并为截图识别请求开启 OpenRouter 联网搜索与 JSON 修复插件；联网会产生额外费用。
       </div>
-
-      <label>OpenRouter API key</label>
-      <input id="openrouterKey" type="password" placeholder="sk-or-..." />
-
-      <label>model</label>
-      <input id="openrouterModel" value="openai/gpt-5.3-codex" />
 
       <div class="row">
         <div>
@@ -379,7 +373,7 @@
 
       <div id="previewWrap" class="preview empty">未选择截图</div>
 
-      <button id="analyzeImage">调用 OpenRouter 识别截图</button>
+      <button id="analyzeImage">调用后端 AI 识别截图</button>
       <div id="aiStatus" class="status"></div>
 
       <label>AI 原始结构化结果</label>
@@ -426,8 +420,6 @@ const chartStatus = document.getElementById("chartStatus");
 const apiStatus = document.getElementById("apiStatus");
 const aiStatus = document.getElementById("aiStatus");
 
-const openrouterKeyInput = document.getElementById("openrouterKey");
-const openrouterModelInput = document.getElementById("openrouterModel");
 const chartTimezoneInput = document.getElementById("chartTimezone");
 const lineHintInput = document.getElementById("lineHint");
 const screenshotInput = document.getElementById("screenshotInput");
@@ -435,182 +427,6 @@ const previewWrap = document.getElementById("previewWrap");
 const analyzeImageBtn = document.getElementById("analyzeImage");
 
 const submitPayloadBtn = document.getElementById("submitPayload");
-
-const OPENROUTER_SYSTEM_PROMPT = [
-  "你是一个严格的 TradingView 趋势线识别器。你的唯一任务，是从用户提供的一张图表截图中识别目标趋势线的两个锚点，并输出严格 JSON，供后端 API 直接调用。",
-  "",
-  "规则：",
-  "1. 只识别人工绘制的趋势线，不要把均线、通道、中轴线、十字光标、订单线、价格标记当成趋势线。",
-  "2. 先判断趋势线最贴近的是哪两根 K 线，再把这两根 K 线的高点/低点当作锚点；不要直接取趋势线延长后碰到屏幕左右边界的位置。",
-  "3. ts1 必须小于 ts2，如果识别顺序反了，自动交换。",
-  "4. ts1 和 ts2 必须是 Unix 毫秒时间戳。",
-  "5. price1 和 price2 必须是数字，不要输出字符串。",
-  "6. 优先使用用户给出的 default_symbol、usd_amount、mode、expected_timeframe、chart_timezone，不要自行改写。",
-  "7. 时间应尽量对齐到对应 K 线开盘时间；价格优先读取锚点对应 K 线的 high/low，支撑线优先 low，压力线优先 high。",
-  "8. 即使无法精确恢复 Unix 毫秒时间戳，也必须在 anchors[*].time_iso 里填写你能识别到的最细粒度时间线索：优先完整 ISO 时间；次选 YYYY-MM-DDTHH:mm；再次选 YYYY-MM-DD。不要因为只有日刻度就把 time_iso 留空。",
-  "9. 如果图中存在多条人工趋势线，优先识别 target_line_hint 指定的那条；如果未指定，则选择最明显、最长、颜色最突出的单条斜向趋势线，并在 notes 说明依据。",
-  "10. 只有在连近似日期/时间线索都无法给出，或者价格也无法识别时，才返回 ready_for_api=false，并把无法确认的字段设为 null。",
-  "11. 如果只能识别到日期，允许 api_payload.ts1/ts2 暂时为 null，但 anchors[*].time_iso 必须保留日期级别信息供前端二次对齐。",
-  "12. 趋势线穿越其他 K 线不算问题，不要因为中途穿越了若干根 K 线就放弃识别；仍然按距离趋势线最近的两根候选 K 线取锚点。",
-  "13. 只输出 JSON 对象，不要输出 Markdown、解释、代码块。",
-  "",
-  "返回 JSON 必须包含：ready_for_api、confidence、symbol、timeframe、chart_timezone、trendline_kind、api_payload、anchors、notes。",
-  "trendline_kind 只能是 descending_resistance、ascending_support、flat、unknown。",
-  "api_payload 必须只包含 ts1、price1、ts2、price2、symbol、usd_amount、mode、interval_seconds、max_checks、stop_on_breakout。",
-].join("\n");
-
-const OPENROUTER_RESPONSE_SCHEMA = {
-  name: "trendline_signal_payload",
-  strict: true,
-  schema: {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "ready_for_api",
-      "confidence",
-      "symbol",
-      "timeframe",
-      "chart_timezone",
-      "trendline_kind",
-      "api_payload",
-      "anchors",
-      "notes"
-    ],
-    properties: {
-      ready_for_api: { type: "boolean" },
-      confidence: { type: "number", minimum: 0, maximum: 1 },
-      symbol: {
-        anyOf: [
-          { type: "string" },
-          { type: "null" }
-        ]
-      },
-      timeframe: {
-        anyOf: [
-          { type: "string" },
-          { type: "null" }
-        ]
-      },
-      chart_timezone: {
-        anyOf: [
-          { type: "string" },
-          { type: "null" }
-        ]
-      },
-      trendline_kind: {
-        type: "string",
-        enum: ["descending_resistance", "ascending_support", "flat", "unknown"]
-      },
-      api_payload: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "ts1",
-          "price1",
-          "ts2",
-          "price2",
-          "symbol",
-          "usd_amount",
-          "mode",
-          "interval_seconds",
-          "max_checks",
-          "stop_on_breakout"
-        ],
-        properties: {
-          ts1: {
-            anyOf: [
-              { type: "integer" },
-              { type: "null" }
-            ]
-          },
-          price1: {
-            anyOf: [
-              { type: "number" },
-              { type: "null" }
-            ]
-          },
-          ts2: {
-            anyOf: [
-              { type: "integer" },
-              { type: "null" }
-            ]
-          },
-          price2: {
-            anyOf: [
-              { type: "number" },
-              { type: "null" }
-            ]
-          },
-          symbol: {
-            anyOf: [
-              { type: "string" },
-              { type: "null" }
-            ]
-          },
-          usd_amount: {
-            anyOf: [
-              { type: "number" },
-              { type: "null" }
-            ]
-          },
-          mode: {
-            anyOf: [
-              { type: "string", enum: ["simulate", "live"] },
-              { type: "null" }
-            ]
-          },
-          interval_seconds: {
-            anyOf: [
-              { type: "integer" },
-              { type: "null" }
-            ]
-          },
-          max_checks: {
-            anyOf: [
-              { type: "integer" },
-              { type: "null" }
-            ]
-          },
-          stop_on_breakout: {
-            anyOf: [
-              { type: "boolean" },
-              { type: "null" }
-            ]
-          }
-        }
-      },
-      anchors: {
-        type: "array",
-        minItems: 2,
-        maxItems: 2,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["label", "time_iso", "price"],
-          properties: {
-            label: {
-              type: "string",
-              enum: ["p1", "p2"]
-            },
-            time_iso: {
-              anyOf: [
-                { type: "string" },
-                { type: "null" }
-              ]
-            },
-            price: {
-              anyOf: [
-                { type: "number" },
-                { type: "null" }
-              ]
-            }
-          }
-        }
-      },
-      notes: { type: "string" }
-    }
-  }
-};
 
 let data = [];
 let lines = [];
@@ -1321,17 +1137,6 @@ function normalizeMode(mode) {
   return null;
 }
 
-function sanitizeOpenRouterApiKey(value) {
-  return String(value || "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "")
-    .replace(/[“”‘’]/g, "")
-    .trim();
-}
-
-function hasInvalidHeaderChars(value) {
-  return /[^\x20-\x7E]/.test(String(value || ""));
-}
-
 function toFiniteNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
@@ -1736,71 +1541,6 @@ function buildManualPayload(line) {
   };
 }
 
-function buildOpenRouterUserPrompt() {
-  const shared = getSharedInputs();
-  const timezone = (chartTimezoneInput.value || "UTC").trim() || "UTC";
-  const lineHint = (lineHintInput.value || "").trim();
-
-  return [
-    "请分析这张 TradingView 截图，提取目标趋势线的两个锚点，并返回严格 JSON。",
-    "",
-    "前端已知参数：",
-    `- default_symbol: ${shared.symbol || "BTCUSDT"}`,
-    `- usd_amount: ${Number.isFinite(shared.usd_amount) ? shared.usd_amount : "null"}`,
-    `- mode: ${shared.mode || "simulate"}`,
-    `- expected_timeframe: ${shared.timeframe || "null"}`,
-    `- chart_timezone: ${timezone || "null"}`,
-    `- target_line_hint: ${lineHint || "null"}`,
-    "",
-    "额外要求：",
-    "- 先判断趋势线最贴近的两根 K 线分别是哪两根，再连接这两根 K 线的 high/low，不要直接取延长线边界。",
-    "- 如果趋势线锚点吸附在 K 线高点/低点，优先读取该 K 线的 high/low 作为价格；上升支撑优先 low，下降压力优先 high。",
-    "- 趋势线中途穿越其他 K 线也没关系，不要因此否定该趋势线；只需要找离趋势线最近的候选 K 线。",
-    "- 时间请尽量对齐到对应 K 线的开盘时间。",
-    "- 如果只能识别到日期，anchors[*].time_iso 也必须填写 YYYY-MM-DD，不要留空。",
-    "- 如果截图只有日刻度，也先给出最接近的日期级别判断，前端会再对齐到最近 candle。",
-    "- 只有在连近似日期都无法识别时，才返回 ready_for_api=false。",
-    "- 只输出 JSON。"
-  ].join("\n");
-}
-
-function extractJsonText(text) {
-  const trimmed = String(text || "").trim();
-  if (!trimmed) throw new Error("模型返回为空");
-
-  try {
-    return JSON.parse(trimmed);
-  } catch (_) {
-    // continue
-  }
-
-  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (codeBlockMatch) {
-    return JSON.parse(codeBlockMatch[1].trim());
-  }
-
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return JSON.parse(trimmed.slice(start, end + 1));
-  }
-
-  throw new Error("模型返回中未找到 JSON 对象");
-}
-
-function messageContentToText(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") return item;
-      if (item && typeof item.text === "string") return item.text;
-      return "";
-    }).join("\n");
-  }
-  if (content && typeof content === "object") return JSON.stringify(content);
-  return "";
-}
-
 function normalizeAiResult(result) {
   if (!result || typeof result !== "object" || Array.isArray(result)) {
     throw new Error("模型返回不是 JSON 对象");
@@ -1876,30 +1616,7 @@ async function readFileAsDataUrl(file) {
 
 async function analyzeScreenshot() {
   clearStatus(aiStatus);
-  const apiKey = sanitizeOpenRouterApiKey(openrouterKeyInput.value);
-  const model = (openrouterModelInput.value || "openai/gpt-5.3-codex").trim();
   const file = screenshotInput.files && screenshotInput.files[0];
-
-  if (apiKey !== openrouterKeyInput.value) {
-    openrouterKeyInput.value = apiKey;
-  }
-
-  if (!apiKey) {
-    setStatus(aiStatus, "请输入 OpenRouter API Key。", "error");
-    return;
-  }
-
-  if (hasInvalidHeaderChars(apiKey)) {
-    setStatus(
-      aiStatus,
-      [
-        "OpenRouter API Key 包含非 ASCII 字符，浏览器无法把它写入 Authorization 请求头。",
-        "请重新粘贴纯文本 key，去掉中文引号、全角空格、零宽字符或其他不可见字符。"
-      ].join("\n"),
-      "error"
-    );
-    return;
-  }
 
   if (!file) {
     setStatus(aiStatus, "请先选择一张 TradingView 截图。", "error");
@@ -1911,52 +1628,25 @@ async function analyzeScreenshot() {
 
   try {
     await ensureCurrentSeriesLoaded();
+    const baseUrl = getApiBaseUrl();
+    if (!baseUrl) {
+      setStatus(aiStatus, "请输入 API base URL。", "error");
+      return;
+    }
+
     const imageDataUrl = await readFileAsDataUrl(file);
     const body = {
-      model,
-      temperature: 0,
-      max_tokens: 1200,
-      plugins: [
-        {
-          id: "web",
-          engine: "native",
-          max_results: 5
-        },
-        {
-          id: "response-healing"
-        }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: OPENROUTER_RESPONSE_SCHEMA
-      },
-      messages: [
-        {
-          role: "system",
-          content: OPENROUTER_SYSTEM_PROMPT
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: buildOpenRouterUserPrompt()
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: imageDataUrl
-              }
-            }
-          ]
-        }
-      ]
+      ...getSharedInputs(),
+      chart_timezone: (chartTimezoneInput.value || "UTC").trim() || "UTC",
+      target_line_hint: (lineHintInput.value || "").trim() || null,
+      image_data_url: imageDataUrl
     };
 
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    setStatus(aiStatus, `正在提交截图到 ${baseUrl}/ai/recognize ...`, "info");
+
+    const res = await fetch(`${baseUrl}/ai/recognize`, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(body)
@@ -1972,14 +1662,14 @@ async function analyzeScreenshot() {
     }
 
     if (!res.ok) {
-      const detail = responseJson?.error?.message || responseJson?.message || responseText || `HTTP ${res.status}`;
+      const detail = responseJson?.detail || responseJson?.error?.message || responseJson?.message || responseText || `HTTP ${res.status}`;
       throw new Error(detail);
     }
 
-    const parsed = responseJson?.choices?.[0]?.message?.parsed
-      || extractJsonText(messageContentToText(responseJson?.choices?.[0]?.message?.content));
-
-    const normalized = normalizeAiResult(parsed);
+    const normalized = normalizeAiResult(responseJson);
+    if (responseJson?.recovery && typeof responseJson.recovery === "object") {
+      normalized.recovery = responseJson.recovery;
+    }
     const recovered = finalizeRecognizedPayload(normalized);
     aiOut.value = JSON.stringify(recovered, null, 2);
 
@@ -2014,13 +1704,14 @@ async function analyzeScreenshot() {
     );
   } catch (e) {
     const message = e?.message || String(e);
-    if (message.includes("non ISO-8859-1 code point")) {
+    if (message === "Failed to fetch") {
       setStatus(
         aiStatus,
         [
-          "识别失败：请求头包含浏览器不允许的非 Latin-1 字符。",
-          "当前最可能的问题是 OpenRouter API Key 里混入了中文引号、全角空格或零宽字符。",
-          "请删除后重新粘贴 key，再试一次。"
+          "识别失败：Failed to fetch",
+          `当前请求地址：${getApiBaseUrl()}/ai/recognize`,
+          "这通常表示浏览器根本没有连上后端接口，而不是 OpenRouter 返回了业务错误。",
+          "如果你是通过服务器域名打开此页面，请把 API base URL 留空或改成当前页面同源地址，不要填 127.0.0.1。"
         ].join("\n"),
         "error"
       );

@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -59,6 +59,10 @@ INTERVAL_TO_MS = {
     "1w": 7 * 24 * 60 * 60 * 1000,
 }
 TRENDLINE_KINDS = {"descending_resistance", "ascending_support", "flat", "unknown"}
+DATA_URL_IMAGE_PATTERN = re.compile(
+    r"^data:(?P<mime>[-\w.+/]+)(?:;charset=[^;,]+)?;base64,(?P<payload>[A-Za-z0-9+/=\s]+)$",
+    re.IGNORECASE,
+)
 OPENROUTER_SYSTEM_PROMPT = "\n".join(
     [
         "你是一个严格的 TradingView 趋势线识别器。你的唯一任务，是从用户提供的一张图表截图中识别目标趋势线的两个锚点，并输出严格 JSON，供后端 API 直接调用。",
@@ -293,6 +297,10 @@ class AiRecognitionInputs(BaseModel):
         return value or None
 
 
+class AiRecognitionRequest(AiRecognitionInputs):
+    image_data_url: str = Field(..., min_length=1)
+
+
 class SignalWatchResult(BaseModel):
     symbol: str
     interval_seconds: int
@@ -492,6 +500,26 @@ def build_openrouter_user_prompt(inputs: AiRecognitionInputs) -> str:
             "- 只输出 JSON。",
         ]
     )
+
+
+def decode_image_data_url(data_url: str) -> tuple[bytes, str]:
+    value = str(data_url or "").strip()
+    match = DATA_URL_IMAGE_PATTERN.match(value)
+    if not match:
+        raise ValueError("image_data_url 必须是 base64 data URL，例如 data:image/png;base64,...")
+
+    mime = str(match.group("mime") or "").strip().lower()
+    if not mime.startswith("image/"):
+        raise ValueError("image_data_url 必须包含 image/* MIME type")
+
+    encoded = re.sub(r"\s+", "", match.group("payload") or "")
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("image_data_url 的 base64 内容无效") from exc
+    if not image_bytes:
+        raise ValueError("image_data_url 不能为空")
+    return image_bytes, mime
 
 
 def message_content_to_text(content: Any) -> str:
@@ -2220,13 +2248,40 @@ def run_watch_job(job_id: str) -> None:
         set_job_failed(job_id, str(e))
 
 
+@app.get("/healthz", include_in_schema=False)
+@app.head("/healthz", include_in_schema=False)
+def healthz() -> Response:
+    return Response(status_code=200)
+
+
 @app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
 @app.get("/manual", include_in_schema=False)
+@app.head("/manual", include_in_schema=False)
 @app.get("/ai", include_in_schema=False)
+@app.head("/ai", include_in_schema=False)
 def serve_ui():
     if not WEB_ENTRY.exists():
         raise HTTPException(status_code=404, detail="1.html not found")
     return FileResponse(WEB_ENTRY)
+
+
+@app.post("/ai/recognize")
+def ai_recognize(payload: AiRecognitionRequest):
+    try:
+        image_bytes, image_content_type = decode_image_data_url(payload.image_data_url)
+        inputs = AiRecognitionInputs(**payload.model_dump(exclude={"image_data_url"}))
+        return recognize_trendline_from_image(
+            image_bytes,
+            inputs,
+            image_content_type=image_content_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        detail = str(exc)
+        status_code = 500 if "OPENROUTER_API_KEY 未配置" in detail else 502
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 @app.post("/signal/watch", response_model=SignalWatchJobAccepted)
