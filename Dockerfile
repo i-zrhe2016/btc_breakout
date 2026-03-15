@@ -10,6 +10,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY main.py /app/main.py
+COPY 1.html /app/1.html
+COPY OPENROUTER_PROMPT.md /app/OPENROUTER_PROMPT.md
 
 EXPOSE 8000
 

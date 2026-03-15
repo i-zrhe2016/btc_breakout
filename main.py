@@ -10,12 +10,15 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Literal, Optional
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -29,6 +32,24 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("trendline_api")
+ROOT_DIR = Path(__file__).resolve().parent
+WEB_ENTRY = ROOT_DIR / "1.html"
+
+
+def get_cors_origins() -> list[str]:
+    raw = str(os.getenv("CORS_ALLOW_ORIGINS") or "*").strip()
+    if raw == "*":
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 JOB_STATUS = Literal["queued", "running", "completed", "failed"]
@@ -655,6 +676,15 @@ def run_watch_job(job_id: str) -> None:
     except Exception as e:
         logger.exception("Background watch job crashed: job_id=%s", job_id)
         set_job_failed(job_id, str(e))
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/manual", include_in_schema=False)
+@app.get("/ai", include_in_schema=False)
+def serve_ui():
+    if not WEB_ENTRY.exists():
+        raise HTTPException(status_code=404, detail="1.html not found")
+    return FileResponse(WEB_ENTRY)
 
 
 @app.post("/signal/watch", response_model=SignalWatchJobAccepted)
