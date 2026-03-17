@@ -2130,15 +2130,15 @@ def build_telegram_help_text(inputs: AiRecognitionInputs) -> str:
             "target_line_hint=蓝色下降压力线",
             "",
             "命令：",
-            "/config 设置默认参数",
-            "/showconfig 查看当前默认参数",
-            "/resetconfig 恢复默认参数",
+            "/config 设置当前 chat 默认参数",
+            "/showconfig 查看当前 chat 默认参数",
+            "/resetconfig 恢复当前 chat 默认参数",
             "/last 查看最近一次识别结果",
             "/confirm 提交当前待确认 payload",
             "/cancel 取消当前待确认 payload",
             "/cancelall 取消当前 chat 创建的所有监控任务，并清掉待确认 payload",
             "",
-            "当前默认参数：",
+            "当前 chat 默认参数：",
             build_ai_config_summary(inputs),
         ]
     )
@@ -2556,17 +2556,22 @@ def handle_telegram_command(token: str, message: dict[str, Any]) -> None:
         telegram_send_message(
             token,
             chat_id,
-            "当前默认参数：\n" + build_ai_config_summary(current_inputs),
+            "当前 chat 默认参数：\n" + build_ai_config_summary(current_inputs),
             reply_to_message_id=message_id,
         )
         return
 
     if command == "/resetconfig":
-        reset_inputs = reset_chat_ai_inputs(chat_id)
+        try:
+            reset_inputs = reset_chat_ai_inputs(chat_id)
+        except Exception as exc:
+            logger.exception("Telegram config reset failed: chat_id=%s", chat_id)
+            telegram_send_message(token, chat_id, f"恢复默认参数失败：{exc}", reply_to_message_id=message_id)
+            return
         telegram_send_message(
             token,
             chat_id,
-            "已恢复默认参数：\n" + build_ai_config_summary(reset_inputs),
+            "已恢复当前 chat 默认参数：\n" + build_ai_config_summary(reset_inputs),
             reply_to_message_id=message_id,
         )
         return
@@ -2647,20 +2652,20 @@ def handle_telegram_command(token: str, message: dict[str, Any]) -> None:
                 telegram_send_message(
                     token,
                     chat_id,
-                    "当前默认参数：\n" + build_ai_config_summary(current_inputs),
+                    "当前 chat 默认参数：\n" + build_ai_config_summary(current_inputs),
                     reply_to_message_id=message_id,
                 )
                 return
             updated = apply_ai_overrides(current_inputs, overrides)
+            set_chat_ai_inputs(chat_id, updated)
         except Exception as exc:
             telegram_send_message(token, chat_id, f"配置更新失败：{exc}", reply_to_message_id=message_id)
             return
 
-        set_chat_ai_inputs(chat_id, updated)
         telegram_send_message(
             token,
             chat_id,
-            "默认参数已更新：\n" + build_ai_config_summary(updated),
+            "当前 chat 默认参数已更新：\n" + build_ai_config_summary(updated),
             reply_to_message_id=message_id,
         )
         return

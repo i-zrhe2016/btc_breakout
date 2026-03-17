@@ -169,6 +169,7 @@ target_line_hint=蓝色下降压力线
 补充说明：
 
 - `/config` 既支持多行 `key=value`，也支持 JSON 对象
+- `/config`、`/showconfig`、`/resetconfig` 都作用于当前 chat 的默认参数
 - 机器人会复用后端同一套 OpenRouter prompt、日期恢复和最近 K 线吸附逻辑
 - 当识别出完整 `api_payload` 时，机器人会先回一张重画后的趋势线预览图和待确认参数
 - 只有在你点击“确认提交”或发送 `/confirm` 后，机器人才会真正提交到 `/signal/watch`
