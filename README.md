@@ -1,27 +1,26 @@
 # BTC Breakout
 
-基于两点趋势线的 BTC 突破监控工具，包含一个 FastAPI 后端、一个单页网页工作台，以及一个可选的 Telegram 截图识别机器人。
+一个面向 Binance USDⓈ-M Futures 的截图画线策略工作台。把入场线截图和止损线截图分别粘贴到网页，AI 识别水平线或趋势线；人工确认参数后，服务端持续监控合约价格并执行 LONG/SHORT 入场和止损。
 
-当前代码已经实现的核心能力：
+默认只运行模拟模式。实盘必须显式设置 `ENABLE_LIVE_FUTURES=true`，并通过二次确认。
 
-- `POST /signal/watch`：创建后台轮询任务，按趋势线判断是否突破
-- `GET /signal/watch/{job_id}`：查询任务状态与检查快照
-- `POST /ai/recognize`：上传 TradingView 截图，走后端 OpenRouter 识别并补全 payload
-- `GET /`、`/manual`、`/ai`：提供同一个 `1.html` 工作台，仅按路径切换页面模式
-- `GET /healthz`、`HEAD /healthz`：健康检查
-- 可选 Telegram 机器人：复用同一套截图识别逻辑
+## 主要能力
 
-## 项目结构
+- 双截图：入场线、止损线各自粘贴、拖放或选择文件
+- 水平线和两点趋势线识别，识别结果可人工修改
+- 同一张 K 线图预览两条线及其当前投影价
+- LONG：价格向上触发入场，向下触发止损
+- SHORT：价格向下触发入场，向上触发止损
+- 价格在启用时已越过入场线，会立即触发
+- Binance 合约逐笔成交 WebSocket，异常时自动降级 REST 行情
+- 模拟和实盘、固定 USDT 名义仓位、1–125 倍杠杆、全仓模式
+- SQLite 保存策略、事件和成交状态；重启后恢复监控
+- 实盘重启恢复前核对交易所持仓，平仓使用 `reduceOnly` 且不超过实际仓位
+- 每个交易对只允许一个活动实盘策略
 
-- `main.py`：FastAPI 服务、后台监控线程、OpenRouter 识别、Telegram 机器人
-- `1.html`：前端工作台，后端根路径直接返回这个文件
-- `Dockerfile`：容器镜像构建
-- `docker-compose.yml`：单容器启动示例
-- `OPENROUTER_PROMPT.md`：截图识别 prompt 说明
+旧版现货趋势线监控仍保留在 `/manual`、`/ai` 和 `/signal/watch`。
 
 ## 快速开始
-
-### 本地运行
 
 ```bash
 python -m venv .venv
@@ -30,286 +29,136 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Docker Compose
+或使用 Docker：
 
 ```bash
 docker compose up -d --build
 docker compose logs -f api
 ```
 
-访问地址：
+入口：
 
-- 工作台首页：`http://127.0.0.1:8000/`
-- 手动画线页：`http://127.0.0.1:8000/manual`
-- AI 识别页：`http://127.0.0.1:8000/ai`
-- Swagger 文档：`http://127.0.0.1:8000/docs`
+- 新策略工作台：`http://127.0.0.1:8000/`
+- 旧版手动画线：`http://127.0.0.1:8000/manual`
+- 旧版单截图识别：`http://127.0.0.1:8000/ai`
+- OpenAPI：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/healthz`
 
-如果前面挂了 Nginx、宝塔、1Panel、云负载均衡等代理，健康检查建议直接指向 `GET /healthz` 或 `HEAD /healthz`。
+## 使用流程
 
-停止容器：
+1. 设置交易对、周期、LONG/SHORT、名义仓位和杠杆。
+2. 在“入场线”卡片粘贴图表截图，选择自动/水平线/趋势线，然后识别。
+3. 在“止损线”卡片重复操作。
+4. 检查回画位置和精确价格；必要时直接编辑水平价格或两个趋势线锚点。
+5. 先用模拟模式启用策略。确认逻辑无误后再切换实盘并完成风险确认。
+6. 状态区会展示行情连接、当前价、两条线投影价、成交和事件记录。
 
-```bash
-docker compose down
-```
+粘贴快捷键是 `Ctrl+V`（macOS 为 `⌘V`）。截图支持 PNG、JPEG、WebP，单张最大 10 MB。识别时请确保价格轴和时间轴清晰，并在“目标线提示”里写明颜色或位置。
 
-如果同时配置了 `OPENROUTER_API_KEY` 和 `TELEGRAM_BOT_TOKEN`，服务启动后会自动开启 Telegram 长轮询机器人。
-
-## 网页端工作台
-
-网页端有两种入口，但最终都会生成同一种 `/signal/watch` payload。
-
-### 手动画线
-
-- 在左侧 K 线图上点击两次，生成趋势线锚点
-- 默认会吸附到当前 K 线 `high/low`
-- 按住 `Shift` 可临时关闭吸附
-- 支持滚轮缩放，支持拖动画布平移
-- 导出后会写入右侧当前 payload，再提交到 `/signal/watch`
-
-### AI 截图识别
-
-- 上传 TradingView 截图后，前端会请求后端 `POST /ai/recognize`
-- 后端会读取 `OPENROUTER_API_KEY`、`OPENROUTER_MODEL` 调用 OpenRouter
-- 当前默认模型是 `openai/gpt-5.3-codex`
-- 请求里会启用 OpenRouter `web` 联网搜索和 `response-healing` 插件
-- 后端会先让模型识别粗锚点，再结合当前 `symbol/timeframe` K 线做两步修复：
-  - 根据截图里的日期级线索尽量补齐 `ts1/ts2`
-  - 把锚点重新吸附到距离粗趋势线最近的两根 K 线 `high/low`
-- 识别成功后，前端会把 payload 回填并尝试回画到左侧图表
-
-AI 页面共享参数：
-
-- `symbol`
-- `timeframe`
-- `usd_amount`
-- `mode`
-- `chart_timezone`
-- `target_line_hint`
-
-说明：
-
-- `chart_timezone` 必须是 IANA 时区名，例如 `UTC`、`Asia/Shanghai`
-- `target_line_hint` 用来提示模型识别哪一条线，例如 `蓝色下降压力线`
-- 网页端截图识别不再要求浏览器直接持有 OpenRouter Key
-- 如果后端未配置 `OPENROUTER_API_KEY`，`/ai/recognize` 会直接报错
-- 左侧图表 K 线预览由浏览器直接请求 `https://api.binance.us/api/v3/klines`，这部分不走后端 `BINANCE_BASE_URL`
-
-## `POST /ai/recognize`
-
-请求体字段：
-
-- `image_data_url`：Base64 Data URL，例如 `data:image/png;base64,...`
-- `symbol`：默认 `BTCUSDT`
-- `timeframe`：默认 `1h`
-- `usd_amount`：默认 `100`
-- `mode`：`simulate` 或 `live`
-- `chart_timezone`：默认 `UTC`
-- `target_line_hint`：可选
-
-最小请求示例：
-
-```bash
-curl -sS -X POST 'http://127.0.0.1:8000/ai/recognize' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "symbol": "BTCUSDT",
-    "timeframe": "1h",
-    "usd_amount": 100,
-    "mode": "simulate",
-    "chart_timezone": "UTC",
-    "target_line_hint": "蓝色下降压力线",
-    "image_data_url": "data:image/png;base64,<...>"
-  }'
-```
-
-响应结构要点：
-
-- `ready_for_api`：是否已经可直接提交到 `/signal/watch`
-- `confidence`：`0` 到 `1`
-- `trendline_kind`：`descending_resistance`、`ascending_support`、`flat`、`unknown`
-- `api_payload`：最终可提交的监控 payload
-- `anchors`：模型识别到的两个锚点
-- `recovery`：如果后端做了日期恢复或最近 K 线吸附，会写这里
-- `notes`：补充说明或需要人工复核的提示
-
-## Telegram 机器人
-
-启动条件：
-
-- `OPENROUTER_API_KEY` 已配置
-- `TELEGRAM_BOT_TOKEN` 已配置
-
-可选限制：
-
-- `TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321`
-
-支持命令：
-
-- `/help`
-- `/config`
-- `/showconfig`
-- `/resetconfig`
-- `/last`
-- `/confirm`
-- `/cancel`
-- `/cancelall`
-
-图片 caption 或 `/config` 支持的参数：
-
-```text
-symbol=BTCUSDT
-timeframe=1h
-usd_amount=100
-mode=simulate
-chart_timezone=UTC
-target_line_hint=蓝色下降压力线
-```
-
-补充说明：
-
-- `/config` 既支持多行 `key=value`，也支持 JSON 对象
-- `/config`、`/showconfig`、`/resetconfig` 都作用于当前 chat 的默认参数
-- 机器人会复用后端同一套 OpenRouter prompt、日期恢复和最近 K 线吸附逻辑
-- 当识别出完整 `api_payload` 时，机器人会先回一张重画后的趋势线预览图和待确认参数
-- 只有在你点击“确认提交”或发送 `/confirm` 后，机器人才会真正提交到 `/signal/watch`
-- 如果要放弃当前待确认结果，可以发送 `/cancel`
-- 如果要停止当前 chat 通过 Telegram 创建的所有监控任务，并同时清掉待确认结果，可以发送 `/cancelall`
-- 建议用原图文件发送截图，避免 Telegram 压缩
-
-## `POST /signal/watch`
-
-这个接口会创建一个后台线程任务，立即返回 `job_id`，然后在后台持续轮询价格。
-
-请求字段：
-
-- `ts1`、`price1`、`ts2`、`price2`：趋势线两个锚点
-- `symbol`：默认 `BTCUSDT`
-- `qty` 或 `usd_amount`：二选一
-- `mode`：`simulate` 或 `live`
-- `current_price`：可选；不传则自动拉取
-- `current_ts`：可选；不传则自动生成当前时间
-- `base_url`：可选；覆盖后端 `BINANCE_BASE_URL`
-- `interval_seconds`：轮询间隔，默认 `15`
-- `max_checks`：最大检查次数，`null` 表示无限
-- `stop_on_breakout`：触发后是否停止，默认 `true`
-- `notify_url`：可选；覆盖 Bark 推送地址
-
-约束：
-
-- `qty` 和 `usd_amount` 不能同时传，也不能同时缺失
-- `ts1` 与 `ts2` 不能相等
-- 当 `max_checks=null` 时，必须 `stop_on_breakout=true`
-
-判定逻辑：
-
-- 下降趋势线：当前价格高于趋势线时返回 `BUY`
-- 上升趋势线：当前价格低于趋势线时返回 `SELL`
-- 水平线：始终返回 `NONE`
-- 未突破时返回 `NONE`
-
-`mode=live` 时的行为：
-
-- 会在首次检测到突破时提交 Binance `MARKET` 订单
-- 下单地址是 `${BINANCE_BASE_URL}/api/v3/order`
-- 需要 `BINANCE_API_KEY` 和 `BINANCE_API_SECRET`
-
-请求示例：
-
-```bash
-curl -sS -X POST 'http://127.0.0.1:8000/signal/watch' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "ts1": 1770332400000,
-    "price1": 60110.73352601156,
-    "ts2": 1771304400000,
-    "price2": 67723.33514450867,
-    "symbol": "BTCUSDT",
-    "usd_amount": 100,
-    "mode": "simulate",
-    "interval_seconds": 15,
-    "max_checks": 120,
-    "stop_on_breakout": true
-  }'
-```
-
-返回示例：
-
-```json
-{
-  "job_id": "3f9f8e4dc94d4f1dadfd5b52f9f4b16c",
-  "status": "queued",
-  "created_ts": 1771305912032
-}
-```
-
-## `GET /signal/watch/{job_id}`
-
-```bash
-curl -sS 'http://127.0.0.1:8000/signal/watch/<job_id>'
-```
-
-状态流转：
-
-- `queued`
-- `running`
-- `completed`
-- `failed`
-- `cancelled`
-
-响应里会包含：
-
-- 任务基础信息
-- `checks_run`
-- `last_snapshot`
-- `error`
-- `result`
-
-`result.snapshots` 会记录每次检查的：
-
-- 当前时间
-- 当前价格
-- 当前趋势线价格
-- 价差与价差百分比
-- 趋势方向
-- 本次动作和原因
+止损线必须位于当前价格的风险侧：LONG 止损低于当前价，SHORT 止损高于当前价。当前版本不设置止盈。
 
 ## 环境变量
 
-- `BINANCE_BASE_URL`：后端行情与下单 API 根地址，默认 `https://api.binance.us`
-- `BINANCE_API_KEY`：`mode=live` 所需
-- `BINANCE_API_SECRET`：`mode=live` 所需
-- `BARK_NOTIFY_URL`：默认 Bark 推送地址
-- `OPENROUTER_API_KEY`：后端 AI 识别和 Telegram 机器人所需
-- `OPENROUTER_API_URL`：可选，自定义 OpenRouter 接口地址
-- `OPENROUTER_MODEL`：默认 `openai/gpt-5.3-codex`
-- `AI_DEFAULT_SYMBOL`：Telegram 默认 `symbol`
-- `AI_DEFAULT_TIMEFRAME`：Telegram 默认 `timeframe`
-- `AI_DEFAULT_USD_AMOUNT`：Telegram 默认 `usd_amount`
-- `AI_DEFAULT_MODE`：Telegram 默认 `mode`
-- `AI_DEFAULT_CHART_TIMEZONE`：Telegram 默认 `chart_timezone`
-- `AI_DEFAULT_LINE_HINT`：Telegram 默认 `target_line_hint`
-- `TELEGRAM_BOT_TOKEN`：Telegram bot token
-- `TELEGRAM_ALLOWED_CHAT_IDS`：允许使用机器人的 chat id 白名单
-- `TELEGRAM_POLL_TIMEOUT_SECONDS`：Telegram 长轮询超时，默认 `60`
-- `LOG_LEVEL`：默认 `INFO`
-- `CORS_ALLOW_ORIGINS`：默认 `*`
+### 截图识别
 
-示例：
+- `OPENROUTER_API_KEY`：必填，AI 截图识别使用
+- `OPENROUTER_API_URL`：默认 OpenRouter chat completions 地址
+- `OPENROUTER_MODEL`：默认 `openai/gpt-5.3-codex`
+
+### Binance Futures
+
+- `BINANCE_FUTURES_BASE_URL`：默认 `https://fapi.binance.com`
+- `BINANCE_FUTURES_WS_URL`：默认 `wss://fstream.binance.com/ws`
+- `BINANCE_API_KEY`、`BINANCE_API_SECRET`：仅实盘需要
+- `ENABLE_LIVE_FUTURES`：只有 `true/1/yes/on` 才允许实盘
+- `STRATEGY_DB_PATH`：默认项目目录下 `strategy_state.db`；Compose 使用 `/data/strategy_state.db`
+
+### 通用和旧版
+
+- `BINANCE_BASE_URL`：旧版现货接口地址
+- `BARK_NOTIFY_URL`：旧版突破通知地址
+- `CORS_ALLOW_ORIGINS`：默认 `*`
+- `LOG_LEVEL`：默认 `INFO`
+- `TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_CHAT_IDS`：可选旧版 Telegram 机器人
+
+实盘示例：
 
 ```bash
+OPENROUTER_API_KEY=sk-or-... \
 BINANCE_API_KEY=your_key \
 BINANCE_API_SECRET=your_secret \
-BINANCE_BASE_URL=https://api.binance.us \
-OPENROUTER_API_KEY=sk-or-... \
-TELEGRAM_BOT_TOKEN=123456:ABCDEF \
-TELEGRAM_ALLOWED_CHAT_IDS=123456789 \
+ENABLE_LIVE_FUTURES=true \
 docker compose up -d --build
 ```
 
-## 当前实现限制
+建议 API Key 只授予合约交易权限，不要授予提现权限，并使用 IP 白名单。
 
-- `WATCH_JOBS` 保存在内存里，服务重启后任务状态会全部丢失
-- Telegram 当前 chat 的默认参数和最近一次识别结果也只保存在内存里
-- 后台监控依赖进程内线程，不适合多副本共享状态；如果做多实例部署，查询任务状态必须回到原始实例
-- 当前代码里存在内置的 `DEFAULT_BARK_NOTIFY_URL` fallback；如果请求里没传 `notify_url`，环境变量也为空，仍会回退到代码默认值
+## 新接口
+
+### `POST /ai/line-recognize`
+
+识别一张入场或止损截图。主要字段：
+
+```json
+{
+  "image_data_url": "data:image/png;base64,<...>",
+  "role": "entry",
+  "expected_line_type": "auto",
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "chart_timezone": "UTC",
+  "target_line_hint": "蓝色下降趋势线"
+}
+```
+
+`expected_line_type` 可用 `auto`、`horizontal`、`trendline`。响应包含 `line`、`confidence`、`image_geometry` 和 `ready_for_strategy`。
+
+### `POST /strategy/watch`
+
+创建策略：
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "chart_timezone": "UTC",
+  "direction": "LONG",
+  "notional_usdt": 100,
+  "leverage": 2,
+  "mode": "simulate",
+  "entry_line": {"kind": "horizontal", "price": 70000},
+  "stop_line": {"kind": "trendline", "ts1": 1760000000000, "price1": 65000, "ts2": 1760100000000, "price2": 65500}
+}
+```
+
+趋势线在两个锚点外也按同一斜率延伸。创建接口会获取实时合约价并验证止损方向。
+
+其他接口：
+
+- `GET /strategy/watch`：最近 50 条策略
+- `GET /strategy/watch/{strategy_id}`：策略详情
+- `DELETE /strategy/watch/{strategy_id}`：取消无持仓策略
+- `DELETE /strategy/watch/{strategy_id}?close_position=true`：取消并平仓
+- `DELETE /strategy/watch/{strategy_id}?close_position=false`：停止监控但保留仓位
+- `GET /market/klines?symbol=BTCUSDT&timeframe=1h&limit=300`：合约 K 线代理
+
+## 实盘保护规则
+
+- 仅支持 Binance One-way Mode；Hedge Mode 会拒绝启用。
+- 使用 CROSSED 全仓并设置所选杠杆。
+- 启用前要求该交易对没有已有持仓或未完成订单。
+- 入场与退出使用确定的 `newClientOrderId`；请求结果不确定时按该 ID 查询，降低重复下单风险。
+- 服务在 `entering` 或 `exiting` 中途重启时不会猜测订单结果，而是进入 `attention_required`。
+- 已开仓策略重启后先核对实际持仓方向和数量，再恢复止损监控。
+- 行情 WebSocket 中断时使用 REST；超过 5 秒无可用行情会记录 stale 事件，但不会依据过期价格触发。
+- SQLite 让单实例能够恢复状态；它不是多副本协调器，不要同时运行多个共享账户的服务实例。
+
+## 测试
+
+```bash
+python -m unittest -v test_strategy.py
+python -m py_compile main.py
+docker compose config --quiet
+```
+
+测试覆盖水平线/趋势线计算、LONG/SHORT 触发、截图识别映射、模拟入场止损、取消和持久化恢复等关键路径。
