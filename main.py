@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -46,6 +46,7 @@ logger = logging.getLogger("trendline_api")
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_ENTRY = ROOT_DIR / "1.html"
 STRATEGY_WEB_ENTRY = ROOT_DIR / "strategy.html"
+SETTINGS_WEB_ENTRY = ROOT_DIR / "settings.html"
 INTERVAL_TO_MS = {
     "1m": 60 * 1000,
     "3m": 3 * 60 * 1000,
@@ -62,6 +63,25 @@ INTERVAL_TO_MS = {
     "3d": 3 * 24 * 60 * 60 * 1000,
     "1w": 7 * 24 * 60 * 60 * 1000,
 }
+
+DEFAULT_CHART_TIMEZONE = "Asia/Shanghai"
+
+
+def normalize_chart_timezone(value: str) -> str:
+    """Accept common UTC+8 labels while storing a stable IANA timezone."""
+    normalized = (value or "").strip() or DEFAULT_CHART_TIMEZONE
+    aliases = {
+        "UTC+8": DEFAULT_CHART_TIMEZONE,
+        "UTC+08:00": DEFAULT_CHART_TIMEZONE,
+        "GMT+8": DEFAULT_CHART_TIMEZONE,
+        "GMT+08:00": DEFAULT_CHART_TIMEZONE,
+    }
+    normalized = aliases.get(normalized.upper(), normalized)
+    try:
+        ZoneInfo(normalized)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"invalid chart_timezone: {value}") from exc
+    return normalized
 TRENDLINE_KINDS = {"descending_resistance", "ascending_support", "flat", "unknown"}
 DATA_URL_IMAGE_PATTERN = re.compile(
     r"^data:(?P<mime>[-\w.+/]+)(?:;charset=[^;,]+)?;base64,(?P<payload>[A-Za-z0-9+/=\s]+)$",
@@ -263,7 +283,7 @@ class AiRecognitionInputs(BaseModel):
     timeframe: str = Field("1h", min_length=1)
     usd_amount: float = Field(100, gt=0)
     mode: Literal["simulate", "live"] = "simulate"
-    chart_timezone: str = Field("UTC", min_length=1)
+    chart_timezone: str = Field(DEFAULT_CHART_TIMEZONE, min_length=1)
     target_line_hint: Optional[str] = None
 
     @field_validator("symbol")
@@ -285,12 +305,7 @@ class AiRecognitionInputs(BaseModel):
     @field_validator("chart_timezone")
     @classmethod
     def normalize_chart_timezone(cls, value: str) -> str:
-        value = value.strip() or "UTC"
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"invalid chart_timezone: {value}") from exc
-        return value
+        return normalize_chart_timezone(value)
 
     @field_validator("target_line_hint")
     @classmethod
@@ -486,7 +501,7 @@ def get_default_ai_inputs() -> AiRecognitionInputs:
             timeframe=os.getenv("AI_DEFAULT_TIMEFRAME") or "1h",
             usd_amount=usd_amount,
             mode=normalize_mode_value(os.getenv("AI_DEFAULT_MODE")) or "simulate",
-            chart_timezone=os.getenv("AI_DEFAULT_CHART_TIMEZONE") or "UTC",
+            chart_timezone=os.getenv("AI_DEFAULT_CHART_TIMEZONE") or DEFAULT_CHART_TIMEZONE,
             target_line_hint=os.getenv("AI_DEFAULT_LINE_HINT") or None,
         )
     except Exception as exc:
@@ -496,7 +511,7 @@ def get_default_ai_inputs() -> AiRecognitionInputs:
             timeframe="1h",
             usd_amount=100,
             mode="simulate",
-            chart_timezone="UTC",
+            chart_timezone=DEFAULT_CHART_TIMEZONE,
             target_line_hint=None,
         )
 
@@ -3107,6 +3122,14 @@ def serve_strategy_ui():
     return FileResponse(STRATEGY_WEB_ENTRY)
 
 
+@app.get("/settings", include_in_schema=False)
+@app.head("/settings", include_in_schema=False)
+def serve_settings_ui():
+    if not SETTINGS_WEB_ENTRY.exists():
+        raise HTTPException(status_code=404, detail="settings.html not found")
+    return FileResponse(SETTINGS_WEB_ENTRY)
+
+
 @app.post("/ai/recognize")
 def ai_recognize(payload: AiRecognitionRequest):
     try:
@@ -3215,10 +3238,10 @@ class LineRecognitionRequest(AiRecognitionInputs):
 class FuturesStrategyRequest(BaseModel):
     symbol: str = Field("BTCUSDT", min_length=3)
     timeframe: str = Field("1h", min_length=1)
-    chart_timezone: str = Field("UTC", min_length=1)
+    chart_timezone: str = Field(DEFAULT_CHART_TIMEZONE, min_length=1)
     direction: Literal["LONG", "SHORT"]
     notional_usdt: float = Field(..., gt=0)
-    leverage: int = Field(1, ge=1, le=125)
+    leverage: int = Field(30, ge=1, le=125)
     mode: Literal["simulate", "live"] = "simulate"
     entry_line: LineSpec
     stop_line: Optional[LineSpec] = None
@@ -3239,12 +3262,27 @@ class FuturesStrategyRequest(BaseModel):
     @field_validator("chart_timezone")
     @classmethod
     def validate_strategy_timezone(cls, value: str) -> str:
-        value = value.strip() or "UTC"
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"invalid chart_timezone: {value}") from exc
-        return value
+        return normalize_chart_timezone(value)
+
+
+class BarkSettingsUpdate(BaseModel):
+    endpoint: str = ""
+    enabled: bool = False
+    notify_on_open: bool = True
+    notify_on_close: bool = True
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Bark 地址必须是完整的 http(s) URL")
+        if parsed.username or parsed.password:
+            raise ValueError("Bark 地址不能包含用户名或密码")
+        return value.rstrip("/") + "/"
 
 
 @dataclass
@@ -3321,6 +3359,25 @@ LINE_RECOGNITION_SCHEMA: dict[str, Any] = {
 }
 
 
+TIMEFRAME_DETECTION_SCHEMA: dict[str, Any] = {
+    "name": "chart_timeframe_detection",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["detected_timeframe", "confidence", "evidence"],
+        "properties": {
+            "detected_timeframe": {
+                "type": "string",
+                "enum": [*INTERVAL_TO_MS.keys(), "unknown"],
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence": {"type": "string"},
+        },
+    },
+}
+
+
 def get_futures_base_url() -> str:
     return str(os.getenv("BINANCE_FUTURES_BASE_URL") or "https://fapi.binance.com").rstrip("/")
 
@@ -3350,7 +3407,92 @@ def init_strategy_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                setting_key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_ts INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
+
+
+def default_bark_settings() -> BarkSettingsUpdate:
+    endpoint = str(os.getenv("BARK_NOTIFY_URL") or "").strip()
+    return BarkSettingsUpdate(
+        endpoint=endpoint,
+        enabled=bool(endpoint),
+        notify_on_open=True,
+        notify_on_close=True,
+    )
+
+
+def get_bark_settings() -> BarkSettingsUpdate:
+    init_strategy_db()
+    with FUTURES_DB_LOCK, sqlite3.connect(get_strategy_db_path()) as conn:
+        row = conn.execute(
+            "SELECT value_json FROM app_settings WHERE setting_key = ?",
+            ("bark",),
+        ).fetchone()
+    if row is None:
+        return default_bark_settings()
+    try:
+        return BarkSettingsUpdate.model_validate_json(row[0])
+    except Exception:
+        logger.exception("Invalid persisted Bark settings; using environment defaults")
+        return default_bark_settings()
+
+
+def save_bark_settings(settings: BarkSettingsUpdate) -> BarkSettingsUpdate:
+    if settings.enabled and not settings.endpoint:
+        raise ValueError("启用 Bark 通知前请填写 Bark 地址")
+    init_strategy_db()
+    with FUTURES_DB_LOCK, sqlite3.connect(get_strategy_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings(setting_key, value_json, updated_ts)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+              value_json=excluded.value_json,
+              updated_ts=excluded.updated_ts
+            """,
+            ("bark", settings.model_dump_json(), int(time.time() * 1000)),
+        )
+        conn.commit()
+    return settings
+
+
+def send_bark_message(endpoint: str, title: str, body: str) -> None:
+    url = f"{endpoint.rstrip('/')}/{quote(title, safe='')}/{quote(body, safe='')}"
+    req = Request(url, method="GET", headers={"User-Agent": "btc-breakout/0.2"})
+    with urlopen(req, timeout=10):
+        return
+
+
+def notify_strategy_bark(state: FuturesStrategyState, event: Literal["open", "close"]) -> None:
+    try:
+        settings = get_bark_settings()
+        should_send = settings.enabled and (
+            (event == "open" and settings.notify_on_open)
+            or (event == "close" and settings.notify_on_close)
+        )
+        if not should_send or not settings.endpoint:
+            return
+        mode = "实盘" if state.payload.mode == "live" else "模拟"
+        side = "做多" if state.payload.direction == "LONG" else "做空"
+        if event == "open":
+            title = f"{state.payload.symbol} 已开仓"
+            body = f"{mode} {side} · {state.payload.leverage}x · 成交价 {state.entry_price:g}"
+        else:
+            title = f"{state.payload.symbol} 已平仓"
+            body = f"{mode} {side} · 平仓价 {state.exit_price:g}"
+        send_bark_message(settings.endpoint, title, body)
+        add_strategy_event(state, "bark_notified", f"Bark {event} 通知已发送")
+    except Exception as exc:
+        logger.warning("Bark strategy notification failed: strategy_id=%s event=%s error=%s", state.strategy_id, event, exc)
+        add_strategy_event(state, "bark_notify_failed", f"Bark 通知发送失败：{exc}", event=event)
 
 
 def strategy_public_dict(state: FuturesStrategyState) -> dict[str, Any]:
@@ -3472,12 +3614,35 @@ def fetch_futures_price(symbol: str) -> float:
 
 
 def fetch_futures_klines(symbol: str, timeframe: str, limit: int = 500) -> list[dict[str, Any]]:
-    raw = futures_public_json(
-        "/fapi/v1/klines",
-        {"symbol": symbol, "interval": timeframe, "limit": max(10, min(limit, 500))},
-    )
+    params = {"symbol": symbol, "interval": timeframe, "limit": max(10, min(limit, 500))}
+    configured = get_futures_base_url()
+    bases = [configured]
+    if configured == "https://fapi.binance.com":
+        bases.extend(["https://fapi1.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com"])
+    errors: list[str] = []
+    raw: Any = None
+    for base in bases:
+        try:
+            raw = request_json(f"{base}/fapi/v1/klines?{urlencode(params)}", timeout=10)
+            if not isinstance(raw, list) or not raw:
+                raise RuntimeError("Binance 返回了空 K 线数据")
+            break
+        except Exception as exc:
+            errors.append(f"{urlsplit(base).netloc}: {exc}")
+    source = "binance_futures"
+    if not isinstance(raw, list) or not raw:
+        try:
+            fallback_url = "https://data-api.binance.vision/api/v3/klines?" + urlencode(params)
+            raw = request_json(fallback_url, timeout=10)
+            if not isinstance(raw, list) or not raw:
+                raise RuntimeError("Binance 参考 K 线返回空数据")
+            source = "binance_spot_fallback"
+            logger.warning("Futures K lines unavailable; using Binance spot reference candles for preview: %s", "；".join(errors))
+        except Exception as exc:
+            errors.append(f"data-api.binance.vision: {exc}")
+            raise RuntimeError("K 线源均不可用；" + "；".join(errors)) from exc
     return [
-        {"ts": int(item[0]), "open": float(item[1]), "high": float(item[2]), "low": float(item[3]), "close": float(item[4])}
+        {"ts": int(item[0]), "open": float(item[1]), "high": float(item[2]), "low": float(item[3]), "close": float(item[4]), "source": source}
         for item in raw
     ]
 
@@ -3486,6 +3651,31 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
     image_bytes, image_type = decode_image_data_url(payload.image_data_url)
     if len(image_bytes) > 10 * 1024 * 1024:
         raise ValueError("截图不能超过 10MB")
+    timeframe_result = run_local_codex(
+        "\n".join(
+            [
+                "你是严谨的 K 线截图周期识别器。只输出严格 JSON。",
+                "先读取图表顶部的周期按钮、标题或时间轴刻度，判断当前 K 线周期。",
+                f"用户期望周期是 {payload.timeframe}，但不要迎合用户，必须按截图实际内容判断。",
+                "无法可靠判断时返回 unknown。不要识别画线，也不要做其他任务。",
+            ]
+        ),
+        image_bytes,
+        image_type,
+        TIMEFRAME_DETECTION_SCHEMA["schema"],
+    )
+    detected_timeframe = str(timeframe_result.get("detected_timeframe") or "unknown")
+    timeframe_confidence = max(0.0, min(1.0, float(timeframe_result.get("confidence") or 0)))
+    if detected_timeframe == "unknown":
+        raise ValueError("无法确认截图 K 线周期，已停止画线识别；请上传周期标识清晰的截图")
+    if timeframe_confidence < 0.65:
+        raise ValueError(
+            f"截图周期识别置信度不足（检测为 {detected_timeframe}，{timeframe_confidence:.0%}），已停止画线识别"
+        )
+    if detected_timeframe != payload.timeframe:
+        raise ValueError(
+            f"截图周期不匹配：检测为 {detected_timeframe}，当前选择为 {payload.timeframe}；已停止画线识别"
+        )
     prompt = "\n".join(
         [
             "识别截图中用于自动交易的唯一一条人工绘制线。只输出严格 JSON。",
@@ -3536,6 +3726,8 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
         "role": payload.role,
         "symbol": payload.symbol,
         "timeframe": payload.timeframe,
+        "detected_timeframe": detected_timeframe,
+        "timeframe_confidence": timeframe_confidence,
         "line": line.model_dump() if line else None,
         "image_geometry": parsed.get("image_geometry"),
         "notes": str(parsed.get("notes") or ""),
@@ -3726,6 +3918,7 @@ def close_strategy_position(state: FuturesStrategyState, current_price: float, *
         state.exit_price = current_price
         state.exit_order = {"simulated": True, "side": "SELL" if state.payload.direction == "LONG" else "BUY"}
     update_strategy_status(state, "cancelled" if cancelled else "completed", "仓位已平仓，策略结束", exit_price=state.exit_price)
+    notify_strategy_bark(state, "close")
 
 
 def run_futures_strategy(strategy_id: str) -> None:
@@ -3772,6 +3965,7 @@ def run_futures_strategy(strategy_id: str) -> None:
                     state.entry_order = {"simulated": True, "side": "BUY" if state.payload.direction == "LONG" else "SELL"}
                 position_message = "入场成交，开始监控止损" if state.payload.stop_line else "入场成交；未设置自动止损，等待手动处理"
                 update_strategy_status(state, "position_open", position_message, entry_price=state.entry_price, quantity=state.filled_qty)
+                notify_strategy_bark(state, "open")
 
             if (
                 state.status == "position_open"
@@ -3867,6 +4061,30 @@ def market_klines(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 5
         return fetch_futures_klines(symbol.strip().upper(), timeframe, limit)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/settings/bark")
+def read_bark_settings():
+    return get_bark_settings().model_dump()
+
+
+@app.put("/settings/bark")
+def update_bark_settings(payload: BarkSettingsUpdate):
+    try:
+        return save_bark_settings(payload).model_dump()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/settings/bark/test")
+def test_bark_settings(payload: BarkSettingsUpdate):
+    if not payload.endpoint:
+        raise HTTPException(status_code=400, detail="请先填写 Bark 地址")
+    try:
+        send_bark_message(payload.endpoint, "BTC Breakout", "Bark 开平仓通知测试成功")
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Bark 测试失败：{exc}") from exc
 
 
 @app.post("/strategy/watch")

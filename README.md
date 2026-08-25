@@ -8,12 +8,15 @@
 
 - 入场线必选、止损线可选；两者都支持粘贴、拖放或选择截图
 - 水平线和两点趋势线识别，识别结果可人工修改
+- 截图先校验 K 线周期；与页面所选周期不一致时停止画线识别
 - 同一张 K 线图预览两条线及其当前投影价
 - LONG：价格向上触发入场，向下触发止损
 - SHORT：价格向下触发入场，向上触发止损
 - 价格在启用时已越过入场线，会立即触发
 - Binance 合约逐笔成交 WebSocket，异常时自动降级 REST 行情
-- 模拟和实盘、固定 USDT 名义仓位、1–125 倍杠杆、全仓模式
+- 组合预览优先使用 Futures K 线；服务器受地域限制时透明降级为 Binance Spot 参考 K 线并在页面标注（不影响策略触发行情源）
+- 模拟和实盘、固定 USDT 名义仓位、默认 30 倍杠杆（可调 1–125 倍）、全仓模式
+- 独立 Bark 设置页，支持实际开仓和完成平仓通知及测试消息
 - SQLite 保存策略、事件和成交状态；重启后恢复监控
 - 实盘重启恢复前核对交易所持仓，平仓使用 `reduceOnly` 且不超过实际仓位
 - 每个交易对只允许一个活动实盘策略
@@ -39,6 +42,7 @@ docker compose logs -f api
 入口：
 
 - 新策略工作台：`http://127.0.0.1:8000/`
+- Bark 通知设置：`http://127.0.0.1:8000/settings`
 - 旧版手动画线：`http://127.0.0.1:8000/manual`
 - 旧版单截图识别：`http://127.0.0.1:8000/ai`
 - OpenAPI：`http://127.0.0.1:8000/docs`
@@ -50,7 +54,7 @@ docker compose logs -f api
 1. 设置交易对、周期、LONG/SHORT、名义仓位和杠杆。
 2. 在“入场线”卡片粘贴图表截图，选择自动/水平线/趋势线，然后识别。
 3. 按需开启“使用止损线”，再在止损线卡片重复操作；关闭时入场后不会自动止损。
-4. 检查回画位置和精确价格；必要时直接编辑水平价格或两个趋势线锚点。
+4. 系统先检查截图周期；匹配后识别并回画，必要时直接编辑水平价格或两个趋势线锚点，组合预览会实时更新。
 5. 先用模拟模式启用策略。确认逻辑无误后再切换实盘并完成风险确认。
 6. 状态区会展示行情连接、当前价、两条线投影价、成交和事件记录。
 
@@ -86,7 +90,7 @@ Compose 只把 `auth.json` 挂载到容器的 `/codex-home/auth.json`，不会�
 ### 通用和旧版
 
 - `BINANCE_BASE_URL`：旧版现货接口地址
-- `BARK_NOTIFY_URL`：旧版突破通知地址
+- `BARK_NOTIFY_URL`：Bark 初始通知地址；网页 `/settings` 保存后以网页配置为准
 - `CORS_ALLOW_ORIGINS`：默认 `*`
 - `LOG_LEVEL`：默认 `INFO`
 - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_CHAT_IDS`：可选旧版 Telegram 机器人
@@ -115,7 +119,7 @@ docker compose up -d --build
   "expected_line_type": "auto",
   "symbol": "BTCUSDT",
   "timeframe": "1h",
-  "chart_timezone": "UTC",
+  "chart_timezone": "Asia/Shanghai",
   "target_line_hint": "蓝色下降趋势线"
 }
 ```
@@ -130,10 +134,10 @@ docker compose up -d --build
 {
   "symbol": "BTCUSDT",
   "timeframe": "1h",
-  "chart_timezone": "UTC",
+  "chart_timezone": "Asia/Shanghai",
   "direction": "LONG",
   "notional_usdt": 100,
-  "leverage": 2,
+  "leverage": 30,
   "mode": "simulate",
   "entry_line": {"kind": "horizontal", "price": 70000},
   "stop_line": {"kind": "trendline", "ts1": 1760000000000, "price1": 65000, "ts2": 1760100000000, "price2": 65500}
@@ -152,6 +156,8 @@ docker compose up -d --build
 - `DELETE /strategy/watch/{strategy_id}?close_position=true`：取消并平仓
 - `DELETE /strategy/watch/{strategy_id}?close_position=false`：停止监控但保留仓位
 - `GET /market/klines?symbol=BTCUSDT&timeframe=1h&limit=300`：合约 K 线代理
+- `GET/PUT /settings/bark`：读取或保存 Bark 开平仓通知配置
+- `POST /settings/bark/test`：按当前表单地址发送 Bark 测试通知
 
 ## 实盘保护规则
 

@@ -8,6 +8,28 @@ import main
 
 
 class LineSpecTests(unittest.TestCase):
+    def test_strategy_defaults_to_30x_and_utc_plus_8(self):
+        payload = main.FuturesStrategyRequest(
+            direction="LONG",
+            notional_usdt=100,
+            entry_line={"kind": "horizontal", "price": 100},
+        )
+        self.assertEqual(payload.leverage, 30)
+        self.assertEqual(payload.chart_timezone, "Asia/Shanghai")
+        self.assertEqual(main.normalize_chart_timezone("UTC+8"), "Asia/Shanghai")
+
+    def test_kline_preview_falls_back_to_binance_spot_reference(self):
+        candle = [1000, "100", "110", "90", "105"]
+        with patch.object(
+            main,
+            "request_json",
+            side_effect=[RuntimeError("451"), [], [], [], [candle]],
+        ) as request:
+            result = main.fetch_futures_klines("BTCUSDT", "1h", 10)
+        self.assertEqual(result[0]["close"], 105)
+        self.assertEqual(result[0]["source"], "binance_spot_fallback")
+        self.assertIn("data-api.binance.vision", request.call_args.args[0])
+
     def test_horizontal_and_trendline_prices(self):
         horizontal = main.LineSpec(kind="horizontal", price=100)
         self.assertEqual(horizontal.price_at(123), 100)
@@ -88,6 +110,40 @@ class StrategyRuntimeTests(unittest.TestCase):
         self.assertEqual(state.exit_price, 89)
         self.assertTrue(state.entry_order["simulated"])
         self.assertTrue(state.exit_order["simulated"])
+
+    def test_bark_notifies_after_open_and_close(self):
+        main.save_bark_settings(
+            main.BarkSettingsUpdate(
+                endpoint="https://api.day.app/test-key/",
+                enabled=True,
+                notify_on_open=True,
+                notify_on_close=True,
+            )
+        )
+        payload = main.FuturesStrategyRequest(
+            direction="LONG",
+            notional_usdt=100,
+            entry_line={"kind": "horizontal", "price": 100},
+            stop_line={"kind": "horizontal", "price": 90},
+        )
+        with patch.object(main, "send_bark_message") as bark:
+            state = self.run_simulation(payload, [101, 89])
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(bark.call_count, 2)
+        self.assertIn("已开仓", bark.call_args_list[0].args[1])
+        self.assertIn("已平仓", bark.call_args_list[1].args[1])
+
+    def test_bark_settings_persist(self):
+        saved = main.save_bark_settings(
+            main.BarkSettingsUpdate(
+                endpoint="https://api.day.app/device/",
+                enabled=True,
+                notify_on_open=False,
+                notify_on_close=True,
+            )
+        )
+        loaded = main.get_bark_settings()
+        self.assertEqual(loaded, saved)
 
     def test_short_supports_trendline_entry_and_stop(self):
         now = int(time.time() * 1000)
@@ -229,6 +285,7 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(captured["command"][2], "recognize")
 
     def test_horizontal_recognition_maps_to_line_spec_and_geometry(self):
+        timeframe = {"detected_timeframe": "1h", "confidence": 0.96, "evidence": "顶部显示 1h"}
         parsed = {
             "ready": True,
             "confidence": 0.91,
@@ -247,16 +304,46 @@ class RecognitionTests(unittest.TestCase):
             expected_line_type="auto",
         )
         with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
-            main, "run_local_codex", return_value=parsed
+            main, "run_local_codex", side_effect=[timeframe, parsed]
         ) as codex_mock:
             result = main.recognize_chart_line(payload)
         self.assertTrue(result["ready_for_strategy"])
         self.assertEqual(result["line"]["kind"], "horizontal")
         self.assertEqual(result["line"]["price"], 98765.5)
         self.assertEqual(result["image_geometry"]["x2"], 0.9)
+        self.assertEqual(result["detected_timeframe"], "1h")
+        self.assertEqual(codex_mock.call_count, 2)
         self.assertEqual(codex_mock.call_args.args[1], b"x")
         self.assertEqual(codex_mock.call_args.args[2], "image/png")
         self.assertEqual(codex_mock.call_args.args[3], main.LINE_RECOGNITION_SCHEMA["schema"])
+
+    def test_timeframe_mismatch_rejects_before_line_recognition(self):
+        payload = main.LineRecognitionRequest(
+            image_data_url="data:image/png;base64,eA==",
+            role="entry",
+            timeframe="1h",
+        )
+        detected = {"detected_timeframe": "4h", "confidence": 0.98, "evidence": "顶部显示 4h"}
+        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
+            main, "run_local_codex", return_value=detected
+        ) as codex_mock:
+            with self.assertRaisesRegex(ValueError, "检测为 4h，当前选择为 1h"):
+                main.recognize_chart_line(payload)
+        codex_mock.assert_called_once()
+
+    def test_low_confidence_timeframe_rejects_before_line_recognition(self):
+        payload = main.LineRecognitionRequest(
+            image_data_url="data:image/png;base64,eA==",
+            role="entry",
+            timeframe="1h",
+        )
+        detected = {"detected_timeframe": "1h", "confidence": 0.4, "evidence": "刻度模糊"}
+        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
+            main, "run_local_codex", return_value=detected
+        ) as codex_mock:
+            with self.assertRaisesRegex(ValueError, "置信度不足"):
+                main.recognize_chart_line(payload)
+        codex_mock.assert_called_once()
 
 
 if __name__ == "__main__":

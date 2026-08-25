@@ -237,6 +237,7 @@
     </div>
     <nav aria-label="主导航">
       <a class="active" href="/">双线策略</a>
+      <a href="/settings">通知设置</a>
       <a href="/manual">手动画线</a>
       <a href="/ai">单图识别</a>
     </nav>
@@ -269,9 +270,9 @@
               <div class="field"><label for="timeframe">截图周期</label><select id="timeframe"><option>15m</option><option selected>1h</option><option>4h</option><option>1d</option></select></div>
               <div class="field full"><label>方向</label><div class="segmented" role="group" aria-label="交易方向"><button id="longBtn" class="long active" type="button" aria-pressed="true">LONG 做多</button><button id="shortBtn" class="short" type="button" aria-pressed="false">SHORT 做空</button></div></div>
               <div class="field"><label for="notional">名义仓位（USDT）</label><input id="notional" type="number" value="100" min="5" step="1" /></div>
-              <div class="field"><label for="leverage">杠杆</label><input id="leverage" type="number" value="1" min="1" max="125" step="1" /></div>
+              <div class="field"><label for="leverage">杠杆</label><input id="leverage" type="number" value="30" min="1" max="125" step="1" /></div>
               <div class="field full"><label>运行模式</label><div class="segmented" role="group" aria-label="运行模式"><button id="simulateBtn" class="active" type="button" aria-pressed="true">SIMULATE 模拟</button><button id="liveBtn" type="button" aria-pressed="false">LIVE 实盘</button></div></div>
-              <div class="field full"><label for="timezone">图表时区</label><input id="timezone" value="UTC" /></div>
+              <div class="field full"><label for="timezone">图表时区</label><select id="timezone"><option value="Asia/Shanghai" selected>UTC+8（北京时间）</option><option value="UTC">UTC</option><option value="Asia/Tokyo">UTC+9（东京）</option><option value="America/New_York">纽约</option></select></div>
             </div>
             <p class="helper">固定名义价值决定订单数量；杠杆只改变所需保证金。live 会把交易对设置为全仓与所选杠杆。</p>
           </div>
@@ -318,7 +319,7 @@
       </div>
 
       <section class="panel chart-panel" aria-labelledby="chartTitle">
-        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>识别结果会回画到当前 Futures K 线</p></div><button id="reloadChart" class="ghost" type="button">刷新 K 线</button></div>
+        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>识别后立即回画；左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button></div></div>
         <div class="chart-wrap">
           <canvas id="chart" role="img" aria-label="BTC 合约 K 线、入场线与止损线预览；下方提供当前价格和两条线的文字数值"></canvas>
           <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span id="stopLegend" class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
@@ -493,13 +494,13 @@
     async function recognize(role) {
       if (!app.images[role]) return;
       const button = $(`${role}Recognize`); button.disabled = true; button.textContent = "识别中…";
-      setBadge(`${role}Badge`, "AI 识别中", "warn"); setBox(`${role}Status`, "正在定位截图中的人工画线，通常需要几十秒…", "info");
+      setBadge(`${role}Badge`, "校验周期中", "warn"); setBox(`${role}Status`, `第一步：正在确认截图是否为 ${$("timeframe").value} 周期；匹配后才会继续识别画线…`, "info");
       try {
         const body = {
           image_data_url: app.images[role], role,
           expected_line_type: $(`${role}Expected`).value,
           symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value,
-          chart_timezone: $("timezone").value.trim() || "UTC", usd_amount: Number($("notional").value), mode: app.mode,
+          chart_timezone: $("timezone").value || "Asia/Shanghai", usd_amount: Number($("notional").value), mode: app.mode,
           target_line_hint: role === "entry" ? "用于入场触发的最明显人工画线" : "用于止损的最明显人工画线"
         };
         const response = await fetch(`${apiBase()}/ai/line-recognize`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -510,7 +511,7 @@
         drawGeometry(role, app.geometries[role]); renderLineEditor(role);
         const low = Number(result.confidence) < .75;
         setBadge(`${role}Badge`, `${result.line.kind === "horizontal" ? "水平线" : "趋势线"} · ${Math.round(Number(result.confidence) * 100)}%`, low ? "warn" : "ok");
-        setBox(`${role}Status`, `${low ? "置信度偏低，请人工复核。\n" : ""}${result.notes || "识别完成，可修改具体参数。"}`, low ? "" : "ok");
+        setBox(`${role}Status`, `周期校验通过：${result.detected_timeframe}（${Math.round(Number(result.timeframe_confidence) * 100)}%）\n${low ? "画线置信度偏低，请人工复核。\n" : ""}${result.notes || "识别完成。"}\n已加入组合预览；下方参数可手动调整。`, low ? "" : "ok");
         if (role === "entry" && !app.lines.stop) setActiveRole("stop"); updateSteps(); updateReview(); drawChart();
       } catch (error) { setBadge(`${role}Badge`, "识别失败", "error"); setBox(`${role}Status`, `识别失败：${error.message || error}`, "error"); }
       finally { button.disabled = false; button.textContent = "重新识别"; }
@@ -519,7 +520,7 @@
     function renderLineEditor(role) {
       const line = app.lines[role], root = $(`${role}Editor`); if (!line) return;
       const isHorizontal = line.kind === "horizontal";
-      root.innerHTML = `<div class="line-editor-title"><strong>${roleLabel[role]}具体位置</strong><span class="badge ${isHorizontal ? "" : "ok"}">${isHorizontal ? "HORIZONTAL" : "TRENDLINE"}</span></div>
+      root.innerHTML = `<div class="line-editor-title"><strong>${roleLabel[role]}识别结果 · 可手动调整</strong><span class="badge ${isHorizontal ? "" : "ok"}">${isHorizontal ? "HORIZONTAL" : "TRENDLINE"}</span></div>
         <div class="form-grid">
           <div class="field full"><label for="${role}Kind">线型</label><select id="${role}Kind"><option value="horizontal" ${isHorizontal ? "selected" : ""}>水平线</option><option value="trendline" ${!isHorizontal ? "selected" : ""}>趋势线</option></select></div>
           ${isHorizontal ? `<div class="field full"><label for="${role}Price">价格</label><input id="${role}Price" type="number" step="0.01" value="${Number(line.price)}" /></div>` : `
@@ -549,12 +550,18 @@
     }
     async function loadChart() {
       $("chartEmpty").classList.remove("hidden"); $("chartEmpty").textContent = "正在加载 Futures K 线…";
+      $("reloadChart").disabled = true; $("reloadChart").textContent = "加载中…";
       try {
         const symbol = $("symbol").value.trim().toUpperCase(), timeframe = $("timeframe").value;
         const response = await fetch(`${apiBase()}/market/klines?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=500`);
         const result = await response.json().catch(() => null); if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
-        app.candles = result; $("chartEmpty").classList.add("hidden"); drawChart(); updateReview();
-      } catch (error) { app.candles = []; $("chartEmpty").textContent = `K 线加载失败\n${error.message || error}`; drawChart(); }
+        if (!Array.isArray(result) || !result.length) throw new Error("行情源返回空数据");
+        app.candles = result;
+        const fallback = result[0]?.source === "binance_spot_fallback";
+        setBadge("chartSource", fallback ? "SPOT 参考源" : "FUTURES", fallback ? "warn" : "ok");
+        $("chartEmpty").classList.add("hidden"); drawChart(); updateReview();
+      } catch (error) { app.candles = []; $("chartEmpty").textContent = `K 线加载失败\n${error.message || error}\n请点击右上角“刷新 K 线”重试`; drawChart(); }
+      finally { $("reloadChart").disabled = false; $("reloadChart").textContent = "刷新 K 线"; }
     }
     function drawChart() {
       const canvas = $("chart"), rect = canvas.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -576,7 +583,7 @@
 
     function lineSummary(line) { if (!line) return "未设置"; return line.kind === "horizontal" ? `水平 @ ${formatPrice(line.price)}` : `趋势线 ${formatPrice(line.price1)} → ${formatPrice(line.price2)}`; }
     function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char])); }
-    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value, chart_timezone: $("timezone").value.trim() || "UTC", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.stopEnabled ? app.lines.stop : null }; }
+    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value, chart_timezone: $("timezone").value || "Asia/Shanghai", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.stopEnabled ? app.lines.stop : null }; }
     function validateForm() {
       const p = strategyPayload(), errors = [];
       if (!p.symbol) errors.push("请输入交易对"); if (!(p.notional_usdt > 0)) errors.push("名义仓位必须大于 0"); if (!Number.isInteger(p.leverage) || p.leverage < 1 || p.leverage > 125) errors.push("杠杆必须是 1–125 的整数");
