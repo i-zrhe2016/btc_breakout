@@ -59,11 +59,23 @@ docker compose logs -f api
 
 ## 环境变量
 
-### 截图识别
+### Codex 截图识别
 
-- `OPENROUTER_API_KEY`：必填，AI 截图识别使用
-- `OPENROUTER_API_URL`：默认 OpenRouter chat completions 地址
-- `OPENROUTER_MODEL`：默认 `openai/gpt-5.3-codex`
+- `OPENAI_API_KEY`：必填，调用 OpenAI Responses API
+- `OPENAI_API_URL`：默认 `https://api.openai.com/v1/responses`
+- `CODEX_MODEL`：默认 `gpt-5.3-codex`
+- `CF_ACCESS_CLIENT_ID`、`CF_ACCESS_CLIENT_SECRET`：可选；当 `OPENAI_API_URL` 指向受 Cloudflare Access 保护的 Worker 时，填写 Access Service Token。后端会分别发送 `CF-Access-Client-Id` 和 `CF-Access-Client-Secret` 请求头；两项必须同时配置
+
+Cloudflare Worker Access 示例：
+
+```bash
+OPENAI_API_URL=https://codex-proxy.example.workers.dev/v1/responses \
+CF_ACCESS_CLIENT_ID=your-service-token-id.access \
+CF_ACCESS_CLIENT_SECRET=your-service-token-secret \
+docker compose up -d --build
+```
+
+Service Token 只保存在服务端环境变量中，不要写入 HTML 或浏览器代码。Worker 后面的接口需与 OpenAI Responses API 请求和响应格式兼容。
 
 ### Binance Futures
 
@@ -84,7 +96,7 @@ docker compose logs -f api
 实盘示例：
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... \
+OPENAI_API_KEY=sk-... \
 BINANCE_API_KEY=your_key \
 BINANCE_API_SECRET=your_secret \
 ENABLE_LIVE_FUTURES=true \

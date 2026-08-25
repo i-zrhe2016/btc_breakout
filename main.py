@@ -34,8 +34,8 @@ app = FastAPI(title="Trendline Breakout API", version="0.1.0")
 
 DEFAULT_BARK_NOTIFY_URL = "https://api.day.app/j32eBocVfwx6kvf8xr452K/"
 DEFAULT_BINANCE_BASE_URL = "https://api.binance.us"
-DEFAULT_OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.3-codex"
+DEFAULT_OPENAI_API_URL = "https://api.openai.com/v1/responses"
+DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 LOG_LEVEL = str(os.getenv("LOG_LEVEL") or "INFO").upper()
 logging.basicConfig(
@@ -67,7 +67,7 @@ DATA_URL_IMAGE_PATTERN = re.compile(
     r"^data:(?P<mime>[-\w.+/]+)(?:;charset=[^;,]+)?;base64,(?P<payload>[A-Za-z0-9+/=\s]+)$",
     re.IGNORECASE,
 )
-OPENROUTER_SYSTEM_PROMPT = "\n".join(
+CODEX_SYSTEM_PROMPT = "\n".join(
     [
         "你是一个严格的 TradingView 趋势线识别器。你的唯一任务，是从用户提供的一张图表截图中识别目标趋势线的两个锚点，并输出严格 JSON，供后端 API 直接调用。",
         "",
@@ -91,7 +91,7 @@ OPENROUTER_SYSTEM_PROMPT = "\n".join(
         "api_payload 必须只包含 ts1、price1、ts2、price2、symbol、usd_amount、mode、interval_seconds、max_checks、stop_on_breakout。",
     ]
 )
-OPENROUTER_RESPONSE_SCHEMA: dict[str, Any] = {
+CODEX_RESPONSE_SCHEMA: dict[str, Any] = {
     "name": "trendline_signal_payload",
     "strict": True,
     "schema": {
@@ -435,6 +435,19 @@ def request_bytes(url: str, *, headers: Optional[dict[str, str]] = None, timeout
         return resp.read(), resp.headers.get_content_type()
 
 
+def get_codex_headers(api_key: str) -> dict[str, str]:
+    """Build OpenAI headers, optionally authenticating through Cloudflare Access."""
+    headers = {"Authorization": f"Bearer {api_key}"}
+    client_id = str(os.getenv("CF_ACCESS_CLIENT_ID") or "").strip()
+    client_secret = str(os.getenv("CF_ACCESS_CLIENT_SECRET") or "").strip()
+    if bool(client_id) != bool(client_secret):
+        raise RuntimeError("CF_ACCESS_CLIENT_ID 和 CF_ACCESS_CLIENT_SECRET 必须同时配置")
+    if client_id:
+        headers["CF-Access-Client-Id"] = client_id
+        headers["CF-Access-Client-Secret"] = client_secret
+    return headers
+
+
 def get_zoneinfo(name: Optional[str]) -> ZoneInfo:
     value = str(name or "UTC").strip() or "UTC"
     try:
@@ -501,7 +514,7 @@ def get_default_ai_inputs() -> AiRecognitionInputs:
         )
 
 
-def build_openrouter_user_prompt(inputs: AiRecognitionInputs) -> str:
+def build_codex_user_prompt(inputs: AiRecognitionInputs) -> str:
     return "\n".join(
         [
             "请分析这张 TradingView 截图，提取目标趋势线的两个锚点，并返回严格 JSON。",
@@ -590,6 +603,33 @@ def extract_json_object(text: Any) -> dict[str, Any]:
             return parsed
 
     raise ValueError("模型返回中未找到 JSON 对象")
+
+
+def extract_codex_response_json(response: Any) -> dict[str, Any]:
+    """Extract a structured JSON object from an OpenAI Responses API response."""
+    if not isinstance(response, dict):
+        raise RuntimeError("Codex 响应格式无效")
+
+    output_text = response.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return extract_json_object(output_text)
+
+    parts: list[str] = []
+    for item in response.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if not isinstance(content, dict) or content.get("type") != "output_text":
+                continue
+            if isinstance(content.get("text"), str):
+                parts.append(content["text"])
+    if parts:
+        return extract_json_object("\n".join(parts))
+
+    error = response.get("error")
+    if isinstance(error, dict) and error.get("message"):
+        raise RuntimeError(f"Codex 请求失败: {error['message']}")
+    raise RuntimeError("Codex 响应缺少 output_text")
 
 
 def validate_ai_payload(payload: dict[str, Any]) -> None:
@@ -1505,11 +1545,11 @@ def recognize_trendline_from_image_with_candles(
     *,
     image_content_type: str = "image/jpeg",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    api_key = str(os.getenv("OPENROUTER_API_KEY") or "").strip()
+    api_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY 未配置")
+        raise RuntimeError("OPENAI_API_KEY 未配置")
 
-    model = str(os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL).strip() or DEFAULT_OPENROUTER_MODEL
+    model = str(os.getenv("CODEX_MODEL") or DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
     candles = fetch_klines(inputs.symbol, inputs.timeframe)
     image_data_url = "data:{mime};base64,{payload}".format(
         mime=image_content_type or "image/jpeg",
@@ -1517,44 +1557,29 @@ def recognize_trendline_from_image_with_candles(
     )
     body = {
         "model": model,
-        "temperature": 0,
-        "max_tokens": 1200,
-        "plugins": [
-            {"id": "web", "engine": "native", "max_results": 5},
-            {"id": "response-healing"},
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": OPENROUTER_RESPONSE_SCHEMA,
-        },
-        "messages": [
-            {"role": "system", "content": OPENROUTER_SYSTEM_PROMPT},
+        "instructions": CODEX_SYSTEM_PROMPT,
+        "max_output_tokens": 4000,
+        "store": False,
+        "text": {"format": CODEX_RESPONSE_SCHEMA},
+        "input": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": build_openrouter_user_prompt(inputs)},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {"type": "input_text", "text": build_codex_user_prompt(inputs)},
+                    {"type": "input_image", "image_url": image_data_url, "detail": "high"},
                 ],
             },
         ],
     }
 
     response_json = request_json(
-        str(os.getenv("OPENROUTER_API_URL") or DEFAULT_OPENROUTER_API_URL).strip(),
+        str(os.getenv("OPENAI_API_URL") or DEFAULT_OPENAI_API_URL).strip(),
         method="POST",
         payload=body,
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=get_codex_headers(api_key),
         timeout=120,
     )
-    choices = response_json.get("choices") if isinstance(response_json, dict) else None
-    if not choices:
-        raise RuntimeError("OpenRouter 响应缺少 choices")
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    parsed = None
-    if isinstance(message, dict):
-        parsed = message.get("parsed")
-        if not isinstance(parsed, dict):
-            parsed = extract_json_object(message_content_to_text(message.get("content")))
+    parsed = extract_codex_response_json(response_json)
     normalized = normalize_ai_result(parsed, inputs)
     return finalize_recognized_payload(normalized, candles, inputs), candles
 
@@ -2897,9 +2922,9 @@ def maybe_start_telegram_bot() -> None:
         logger.info("Telegram bot disabled: TELEGRAM_BOT_TOKEN not configured")
         return
 
-    openrouter_key = str(os.getenv("OPENROUTER_API_KEY") or "").strip()
-    if not openrouter_key:
-        logger.warning("Telegram bot disabled: OPENROUTER_API_KEY not configured")
+    openai_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
+    if not openai_key:
+        logger.warning("Telegram bot disabled: OPENAI_API_KEY not configured")
         return
 
     if TELEGRAM_BOT_THREAD is not None and TELEGRAM_BOT_THREAD.is_alive():
@@ -3098,7 +3123,7 @@ def ai_recognize(payload: AiRecognitionRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         detail = str(exc)
-        status_code = 500 if "OPENROUTER_API_KEY 未配置" in detail else 502
+        status_code = 500 if "OPENAI_API_KEY 未配置" in detail else 502
         raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
@@ -3463,9 +3488,9 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
     image_bytes, image_type = decode_image_data_url(payload.image_data_url)
     if len(image_bytes) > 10 * 1024 * 1024:
         raise ValueError("截图不能超过 10MB")
-    api_key = str(os.getenv("OPENROUTER_API_KEY") or "").strip()
+    api_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY 未配置")
+        raise RuntimeError("OPENAI_API_KEY 未配置")
     image_url = f"data:{image_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
     prompt = "\n".join(
         [
@@ -3479,30 +3504,29 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
         ]
     )
     body = {
-        "model": str(os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL),
-        "temperature": 0,
-        "max_tokens": 1000,
-        "plugins": [{"id": "response-healing"}],
-        "response_format": {"type": "json_schema", "json_schema": LINE_RECOGNITION_SCHEMA},
-        "messages": [
-            {"role": "system", "content": "你是严谨的金融图表线段识别器。"},
-            {"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]},
+        "model": str(os.getenv("CODEX_MODEL") or DEFAULT_CODEX_MODEL),
+        "instructions": "你是严谨的金融图表线段识别器。",
+        "max_output_tokens": 4000,
+        "store": False,
+        "text": {"format": LINE_RECOGNITION_SCHEMA},
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": image_url, "detail": "high"},
+                ],
+            },
         ],
     }
     response = request_json(
-        str(os.getenv("OPENROUTER_API_URL") or DEFAULT_OPENROUTER_API_URL),
+        str(os.getenv("OPENAI_API_URL") or DEFAULT_OPENAI_API_URL),
         method="POST",
         payload=body,
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=get_codex_headers(api_key),
         timeout=120,
     )
-    choices = response.get("choices") if isinstance(response, dict) else None
-    if not choices:
-        raise RuntimeError("OpenRouter 响应缺少 choices")
-    message = choices[0].get("message") or {}
-    parsed = message.get("parsed") if isinstance(message, dict) else None
-    if not isinstance(parsed, dict):
-        parsed = extract_json_object(message_content_to_text(message.get("content")))
+    parsed = extract_codex_response_json(response)
 
     expected = payload.expected_line_type
     line_type = parsed.get("line_type")
@@ -3845,7 +3869,7 @@ def ai_line_recognize(payload: LineRecognitionRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        status_code = 500 if "OPENROUTER_API_KEY 未配置" in str(exc) else 502
+        status_code = 500 if "OPENAI_API_KEY 未配置" in str(exc) else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 

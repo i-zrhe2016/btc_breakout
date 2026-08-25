@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY main.py /app/main.py
 COPY 1.html /app/1.html
 COPY strategy.html /app/strategy.html
-COPY OPENROUTER_PROMPT.md /app/OPENROUTER_PROMPT.md
+COPY CODEX_PROMPT.md /app/CODEX_PROMPT.md
 
 EXPOSE 8000
 

@@ -1,4 +1,4 @@
-# OpenRouter TradingView Prompt
+# Codex TradingView Prompt
 
 这个 prompt 用于网页端把一张 TradingView 趋势线截图发给视觉模型，让模型输出可直接传给本项目 `/signal/watch` 的 JSON。
 

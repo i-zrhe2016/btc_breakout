@@ -345,21 +345,21 @@
       <button id="recognizeCanvas">调用 Codex 识别当前画布</button>
 
       <div class="hint">
-        Codex 会截取当前 K 线画布，识别最后画出的亮青色趋势线，并把识别结果回填到当前 payload。后端需配置 <code>OPENROUTER_API_KEY</code>。
+        Codex 会截取当前 K 线画布，识别最后画出的亮青色趋势线，并把识别结果回填到当前 payload。后端需配置 <code>OPENAI_API_KEY</code>。
       </div>
 
       <div id="chartStatus" class="status" role="status" aria-live="polite"></div>
     </div>
 
     <div class="panel ai-page-only page-only">
-      <h3>OpenRouter 截图识别</h3>
+      <h3>Codex 截图识别</h3>
 
       <div class="hint">
-        页面会把截图提交给当前后端，再由后端读取 `.env` 里的 <code>OPENROUTER_API_KEY</code> 和 <code>OPENROUTER_MODEL</code> 调用 OpenRouter。
+        页面会把截图提交给当前后端，再由后端读取 `.env` 里的 <code>OPENAI_API_KEY</code> 和 <code>CODEX_MODEL</code> 调用 OpenAI Responses API。
       </div>
 
       <div class="hint">
-        当前默认使用 <code>openai/gpt-5.3-codex</code>，并为截图识别请求开启 OpenRouter 联网搜索与 JSON 修复插件；联网会产生额外费用。
+        当前默认使用 <code>gpt-5.3-codex</code>，通过结构化输出返回可校验的 JSON。
       </div>
 
       <div class="row">
@@ -1748,7 +1748,7 @@ async function recognizeImageWithCodex(imageDataUrl, options = {}) {
         [
           "识别失败：Failed to fetch",
           `当前请求地址：${getApiBaseUrl()}/ai/recognize`,
-          "这通常表示浏览器根本没有连上后端接口，而不是 OpenRouter 返回了业务错误。",
+          "这通常表示浏览器根本没有连上后端接口，而不是 Codex 返回了业务错误。",
           "如果你是通过服务器域名打开此页面，请把 API base URL 留空或改成当前页面同源地址，不要填 127.0.0.1。"
         ].join("\n"),
         "error"

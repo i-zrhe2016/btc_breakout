@@ -176,6 +176,41 @@ class StrategyRuntimeTests(unittest.TestCase):
 
 
 class RecognitionTests(unittest.TestCase):
+    def test_codex_headers_without_cloudflare_access(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(main.get_codex_headers("test-key"), {"Authorization": "Bearer test-key"})
+
+    def test_codex_headers_include_cloudflare_access_service_token(self):
+        with patch.dict(
+            os.environ,
+            {"CF_ACCESS_CLIENT_ID": "client-id.access", "CF_ACCESS_CLIENT_SECRET": "client-secret"},
+            clear=True,
+        ):
+            self.assertEqual(
+                main.get_codex_headers("test-key"),
+                {
+                    "Authorization": "Bearer test-key",
+                    "CF-Access-Client-Id": "client-id.access",
+                    "CF-Access-Client-Secret": "client-secret",
+                },
+            )
+
+    def test_codex_headers_reject_partial_cloudflare_access_config(self):
+        with patch.dict(os.environ, {"CF_ACCESS_CLIENT_ID": "client-id.access"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "必须同时配置"):
+                main.get_codex_headers("test-key")
+
+    def test_extract_codex_response_json_from_output_message(self):
+        response = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"ready": true}'}],
+                }
+            ]
+        }
+        self.assertEqual(main.extract_codex_response_json(response), {"ready": True})
+
     def test_horizontal_recognition_maps_to_line_spec_and_geometry(self):
         parsed = {
             "ready": True,
@@ -189,20 +224,31 @@ class RecognitionTests(unittest.TestCase):
             "image_geometry": {"x1": 0.1, "y1": 0.4, "x2": 0.9, "y2": 0.4},
             "notes": "blue horizontal line",
         }
-        request = main.LineRecognitionRequest(
+        payload = main.LineRecognitionRequest(
             image_data_url="data:image/png;base64,eA==",
             role="entry",
             expected_line_type="auto",
         )
-        response = {"choices": [{"message": {"parsed": parsed}}]}
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test"}), patch.object(
+        response = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": main.json.dumps(parsed)}],
+                }
+            ]
+        }
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), patch.object(
             main, "decode_image_data_url", return_value=(b"x", "image/png")
-        ), patch.object(main, "request_json", return_value=response):
-            result = main.recognize_chart_line(request)
+        ), patch.object(main, "request_json", return_value=response) as request_mock:
+            result = main.recognize_chart_line(payload)
         self.assertTrue(result["ready_for_strategy"])
         self.assertEqual(result["line"]["kind"], "horizontal")
         self.assertEqual(result["line"]["price"], 98765.5)
         self.assertEqual(result["image_geometry"]["x2"], 0.9)
+        request_body = request_mock.call_args.kwargs["payload"]
+        self.assertEqual(request_body["model"], "gpt-5.3-codex")
+        self.assertIn("input", request_body)
+        self.assertNotIn("messages", request_body)
 
 
 if __name__ == "__main__":
