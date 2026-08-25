@@ -30,6 +30,13 @@ class PreviewMarkupTests(unittest.TestCase):
         self.assertIn('saved.lines.entry = app.lines.entry || null;', markup)
         self.assertIn('$("chartExpand").addEventListener("click", () => persistWorkspace())', markup)
 
+    def test_preview_supports_drag_and_keyboard_trendline_adjustment(self):
+        markup = (Path(__file__).parent / "preview.html").read_text(encoding="utf-8")
+        self.assertIn('id="trendlineEditor"', markup)
+        self.assertIn('id="applyTrendline"', markup)
+        self.assertIn("canvas.onpointerdown", markup)
+        self.assertIn("persistTrendlineWorkspace", markup)
+
 
 class LineSpecTests(unittest.TestCase):
     def test_strategy_defaults_to_30x_and_utc_plus_8(self):
