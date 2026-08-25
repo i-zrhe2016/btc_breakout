@@ -8,37 +8,36 @@ from unittest.mock import patch
 import main
 
 
-class PreviewMarkupTests(unittest.TestCase):
-    def test_preview_bounds_trendline_to_anchor_interval(self):
-        markup = (Path(__file__).parent / "preview.html").read_text(encoding="utf-8")
-        self.assertIn("趋势线只绘制 P1–P2 锚点区间", markup)
-        self.assertIn("segmentStart", markup)
-        self.assertIn("segmentEnd", markup)
-        self.assertIn("趋势线仅显示锚点区间", markup)
-
-    def test_timeframe_controls_support_auto_detection_and_switching(self):
-        for name in ("recognition.html", "preview.html", "strategy.html"):
-            markup = (Path(__file__).parent / name).read_text(encoding="utf-8")
-            self.assertIn('value="auto"', markup, name)
-            self.assertIn("30m", markup, name)
-            self.assertIn("1w", markup, name)
-
-    def test_strategy_expand_persists_current_lines_before_navigation(self):
+class ManualDrawingMarkupTests(unittest.TestCase):
+    def test_strategy_uses_manual_chart_tools_and_no_screenshot_flow(self):
         markup = (Path(__file__).parent / "strategy.html").read_text(encoding="utf-8")
-        self.assertIn('id="chartExpand"', markup)
-        self.assertIn("function persistWorkspace()", markup)
-        self.assertIn('saved.lines.entry = app.lines.entry || null;', markup)
-        self.assertIn('$("chartExpand").addEventListener("click", () => persistWorkspace())', markup)
+        self.assertIn("lightweight-charts@4.2.3", markup)
+        self.assertIn('id="trendTool"', markup)
+        self.assertIn('id="horizontalTool"', markup)
+        self.assertIn('id="snapTool"', markup)
+        self.assertIn("function detectBreakout(line)", markup)
+        self.assertIn("function priceAt(line, ts)", markup)
+        self.assertIn("function snapPoint(point)", markup)
+        self.assertIn("function finalizeTrendline(end)", markup)
+        self.assertIn("function chartRightOffset()", markup)
+        self.assertIn("rightOffset: chartRightOffset()", markup)
+        self.assertIn("coordinateToLogical", markup)
+        self.assertIn("getVisibleLogicalRange", markup)
+        self.assertIn("function clampTrendlineAnchorTs", markup)
+        self.assertIn("function clampTrendlineDeltaTs", markup)
+        self.assertIn("timeScale.logicalToCoordinate((numericTs", markup)
+        self.assertIn("单击第一锚点，再单击第二锚点", markup)
+        self.assertNotIn("image_data_url", markup)
+        self.assertNotIn("Codex", markup)
 
-    def test_preview_supports_drag_and_keyboard_trendline_adjustment(self):
-        markup = (Path(__file__).parent / "preview.html").read_text(encoding="utf-8")
-        self.assertIn('id="trendlineEditor"', markup)
-        self.assertIn('id="applyTrendline"', markup)
-        self.assertIn("canvas.onpointerdown", markup)
-        self.assertIn("persistTrendlineWorkspace", markup)
-        self.assertIn("distance=36", markup)
-        self.assertIn("function editorLineHit", markup)
-        self.assertIn("function finishLineDrag", markup)
+    def test_strategy_persists_multiple_lines_and_strategy_roles(self):
+        markup = (Path(__file__).parent / "strategy.html").read_text(encoding="utf-8")
+        self.assertIn("entryLineId", markup)
+        self.assertIn("stopLineId", markup)
+        self.assertIn("localStorage.setItem(storageKey", markup)
+        self.assertIn("setLineDirection", markup)
+        self.assertIn("cancelDrawing", markup)
+        self.assertIn('event.key === "Delete"', markup)
 
 
 class LineSpecTests(unittest.TestCase):
@@ -315,123 +314,6 @@ class StrategyRuntimeTests(unittest.TestCase):
         order_params = next(item[2] for item in calls if item[0].endswith("/order") and item[1] == "POST")
         self.assertEqual(order_params["quantity"], "1.25")
         self.assertEqual(order_params["reduceOnly"], "true")
-
-
-class RecognitionTests(unittest.TestCase):
-    def test_local_codex_uses_saved_login_and_structured_output(self):
-        captured = {}
-
-        def run(command, **kwargs):
-            captured["command"] = command
-            captured["env"] = kwargs["env"]
-            output_path = command[command.index("--output-last-message") + 1]
-            with open(output_path, "w", encoding="utf-8") as output:
-                output.write('{"ready": true}')
-            return main.subprocess.CompletedProcess(command, 0, stdout='{"ready": true}', stderr="")
-
-        env = {
-            "OPENAI_API_KEY": "must-not-leak",
-            "CODEX_API_KEY": "must-not-leak",
-            "CODEX_MODEL": "gpt-test-codex",
-        }
-        with patch.dict(os.environ, env, clear=True), patch.object(main.subprocess, "run", side_effect=run):
-            result = main.run_local_codex("recognize", b"image", "image/png", {"type": "object"})
-
-        self.assertEqual(result, {"ready": True})
-        self.assertNotIn("OPENAI_API_KEY", captured["env"])
-        self.assertNotIn("CODEX_API_KEY", captured["env"])
-        self.assertIn("--ephemeral", captured["command"])
-        self.assertIn("--output-schema", captured["command"])
-        self.assertIn("--image", captured["command"])
-        self.assertEqual(captured["command"][-2:], ["--model", "gpt-test-codex"])
-        self.assertEqual(captured["command"][2], "recognize")
-
-    def test_horizontal_recognition_maps_to_line_spec_and_geometry(self):
-        timeframe = {"detected_timeframe": "1h", "confidence": 0.96, "evidence": "顶部显示 1h"}
-        parsed = {
-            "ready": True,
-            "confidence": 0.91,
-            "line_type": "horizontal",
-            "horizontal_price": 98765.5,
-            "anchors": [
-                {"time_iso": None, "timestamp_ms": None, "price": 98765.5},
-                {"time_iso": None, "timestamp_ms": None, "price": 98765.5},
-            ],
-            "image_geometry": {"x1": 0.1, "y1": 0.4, "x2": 0.9, "y2": 0.4},
-            "notes": "blue horizontal line",
-        }
-        payload = main.LineRecognitionRequest(
-            image_data_url="data:image/png;base64,eA==",
-            role="entry",
-            expected_line_type="auto",
-        )
-        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
-            main, "run_local_codex", side_effect=[timeframe, parsed]
-        ) as codex_mock:
-            result = main.recognize_chart_line(payload)
-        self.assertTrue(result["ready_for_strategy"])
-        self.assertEqual(result["line"]["kind"], "horizontal")
-        self.assertEqual(result["line"]["price"], 98765.5)
-        self.assertEqual(result["image_geometry"]["x2"], 0.9)
-        self.assertEqual(result["detected_timeframe"], "1h")
-        self.assertEqual(codex_mock.call_count, 2)
-        self.assertEqual(codex_mock.call_args.args[1], b"x")
-        self.assertEqual(codex_mock.call_args.args[2], "image/png")
-        self.assertEqual(codex_mock.call_args.args[3], main.LINE_RECOGNITION_SCHEMA["schema"])
-
-    def test_auto_timeframe_uses_detected_left_corner_period(self):
-        parsed_timeframe = {"detected_timeframe": "4h", "confidence": 0.95, "evidence": "左上角显示 4h"}
-        parsed_line = {
-            "ready": True,
-            "confidence": 0.9,
-            "line_type": "horizontal",
-            "horizontal_price": 98765.5,
-            "anchors": [
-                {"time_iso": None, "timestamp_ms": None, "price": 98765.5},
-                {"time_iso": None, "timestamp_ms": None, "price": 98765.5},
-            ],
-            "image_geometry": {"x1": 0.1, "y1": 0.4, "x2": 0.9, "y2": 0.4},
-            "notes": "line",
-        }
-        payload = main.LineRecognitionRequest(
-            image_data_url="data:image/png;base64,eA==",
-            role="entry",
-            timeframe="auto",
-        )
-        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
-            main, "run_local_codex", side_effect=[parsed_timeframe, parsed_line]
-        ):
-            result = main.recognize_chart_line(payload)
-        self.assertEqual(result["detected_timeframe"], "4h")
-        self.assertEqual(result["timeframe"], "4h")
-
-    def test_timeframe_mismatch_rejects_before_line_recognition(self):
-        payload = main.LineRecognitionRequest(
-            image_data_url="data:image/png;base64,eA==",
-            role="entry",
-            timeframe="1h",
-        )
-        detected = {"detected_timeframe": "4h", "confidence": 0.98, "evidence": "顶部显示 4h"}
-        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
-            main, "run_local_codex", return_value=detected
-        ) as codex_mock:
-            with self.assertRaisesRegex(ValueError, "检测为 4h，当前选择为 1h"):
-                main.recognize_chart_line(payload)
-        codex_mock.assert_called_once()
-
-    def test_low_confidence_timeframe_rejects_before_line_recognition(self):
-        payload = main.LineRecognitionRequest(
-            image_data_url="data:image/png;base64,eA==",
-            role="entry",
-            timeframe="1h",
-        )
-        detected = {"detected_timeframe": "1h", "confidence": 0.4, "evidence": "刻度模糊"}
-        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
-            main, "run_local_codex", return_value=detected
-        ) as codex_mock:
-            with self.assertRaisesRegex(ValueError, "置信度不足"):
-                main.recognize_chart_line(payload)
-        codex_mock.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -13,24 +13,10 @@ services:
       - ENABLE_LIVE_FUTURES=${ENABLE_LIVE_FUTURES:-false}
       - STRATEGY_DB_PATH=/data/strategy_state.db
       - BARK_NOTIFY_URL=${BARK_NOTIFY_URL:-}
-      - CODEX_HOME=/codex-home
-      - CODEX_CLI_PATH=/usr/local/bin/codex
-      - CODEX_MODEL=${CODEX_MODEL:-}
-      - CODEX_TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-180}
-      - AI_DEFAULT_SYMBOL=${AI_DEFAULT_SYMBOL:-BTCUSDT}
-      - AI_DEFAULT_TIMEFRAME=${AI_DEFAULT_TIMEFRAME:-1h}
-      - AI_DEFAULT_USD_AMOUNT=${AI_DEFAULT_USD_AMOUNT:-100}
-      - AI_DEFAULT_MODE=${AI_DEFAULT_MODE:-simulate}
-      - AI_DEFAULT_CHART_TIMEZONE=${AI_DEFAULT_CHART_TIMEZONE:-Asia/Shanghai}
-      - AI_DEFAULT_LINE_HINT=${AI_DEFAULT_LINE_HINT:-}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_ALLOWED_CHAT_IDS=${TELEGRAM_ALLOWED_CHAT_IDS:-}
-      - TELEGRAM_POLL_TIMEOUT_SECONDS=${TELEGRAM_POLL_TIMEOUT_SECONDS:-60}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-*}
     volumes:
       - strategy_data:/data
-      - ${CODEX_AUTH_FILE:-/root/.codex/auth.json}:/codex-home/auth.json
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
