@@ -23,6 +23,13 @@ class PreviewMarkupTests(unittest.TestCase):
             self.assertIn("30m", markup, name)
             self.assertIn("1w", markup, name)
 
+    def test_strategy_expand_persists_current_lines_before_navigation(self):
+        markup = (Path(__file__).parent / "strategy.html").read_text(encoding="utf-8")
+        self.assertIn('id="chartExpand"', markup)
+        self.assertIn("function persistWorkspace()", markup)
+        self.assertIn('saved.lines.entry = app.lines.entry || null;', markup)
+        self.assertIn('$("chartExpand").addEventListener("click", () => persistWorkspace())', markup)
+
 
 class LineSpecTests(unittest.TestCase):
     def test_strategy_defaults_to_30x_and_utc_plus_8(self):

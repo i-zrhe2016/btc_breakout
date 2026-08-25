@@ -325,7 +325,7 @@
       </div>
 
       <section class="panel chart-panel" aria-labelledby="chartTitle">
-        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>大画布显示识别结果；趋势线只连接两个锚点，左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button><a class="chart-expand" href="/preview">打开大画布</a></div></div>
+        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>大画布显示识别结果；趋势线只连接两个锚点，左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button><a id="chartExpand" class="chart-expand" href="/preview">打开大画布</a></div></div>
         <div class="chart-wrap">
           <canvas id="chart" role="img" aria-label="BTC 合约 K 线、入场线与止损线预览；下方提供当前价格和两条线的文字数值"></canvas>
           <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span id="stopLegend" class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
@@ -395,11 +395,13 @@
       currentStrategy: null,
       pollTimer: null,
       detectedTimeframe: null,
+      timeframeMode: "auto",
       timeframeNeedsRecognition: false
     };
     const roleLabel = { entry: "入场线", stop: "止损线" };
     const supportedTimeframes = new Set(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"]);
     const chartFallbackTimeframe = "1h";
+    const workspaceKey = "btcBreakoutRecognitionWorkspace";
     const terminalStatuses = new Set(["completed", "cancelled", "position_left_open", "failed", "attention_required"]);
 
     function apiBase() { return String(window.location.origin || "http://127.0.0.1:8000").replace(/\/$/, ""); }
@@ -408,6 +410,20 @@
     function setBadge(id, text, kind = "") { const el = $(id); el.textContent = text; el.className = `badge ${kind}`.trim(); }
     function selectedTimeframe() { const value = $("timeframe").value; return value === "auto" ? (app.detectedTimeframe || chartFallbackTimeframe) : value; }
     function setTimeframeState(message, kind = "") { const el = $("timeframeState"); el.textContent = message; el.className = `field-state ${kind}`.trim(); }
+    function readWorkspace() { try { return JSON.parse(localStorage.getItem(workspaceKey) || "{}") || {}; } catch (_) { return {}; } }
+    function persistWorkspace() {
+      const saved = readWorkspace();
+      const selected = $("timeframe").value;
+      saved.symbol = $("symbol").value.trim().toUpperCase();
+      saved.timeframe = selected === "auto" ? selectedTimeframe() : selected;
+      saved.timeframe_mode = app.timeframeMode || (selected === "auto" ? "auto" : "manual");
+      saved.detected_timeframe = app.detectedTimeframe || null;
+      saved.timezone = $("timezone").value || "Asia/Shanghai";
+      saved.lines = saved.lines || {};
+      saved.lines.entry = app.lines.entry || null;
+      saved.lines.stop = app.stopEnabled ? (app.lines.stop || null) : null;
+      localStorage.setItem(workspaceKey, JSON.stringify(saved));
+    }
     function refreshTimeframeState() {
       const selected = $("timeframe").value;
       if (selected === "auto") setTimeframeState(app.detectedTimeframe ? `自动模式 · 当前 ${app.detectedTimeframe}` : "等待截图左上角周期", app.detectedTimeframe ? "ok" : "warn");
@@ -415,10 +431,12 @@
     }
     function handleTimeframeChange() {
       const selected = $("timeframe").value;
+      app.timeframeMode = selected === "auto" ? "auto" : "manual";
       const hasRecognition = Boolean(app.images.entry || app.images.stop || app.lines.entry || app.lines.stop);
       app.timeframeNeedsRecognition = hasRecognition && Boolean(app.detectedTimeframe) && selected !== "auto" && selected !== app.detectedTimeframe;
       refreshTimeframeState();
       updateReview();
+      persistWorkspace();
       clearTimeout(window.chartReloadTimer);
       window.chartReloadTimer = setTimeout(loadChart, 150);
     }
@@ -475,7 +493,7 @@
       } else if (app.lines.stop) setBadge("stopBadge", "已设置", "ok");
       else if (app.images.stop) setBadge("stopBadge", "等待识别", "warn");
       else setBadge("stopBadge", "可选 · 等待截图");
-      updateRiskNote(); updateSteps(); updateReview(); drawChart();
+      updateRiskNote(); updateSteps(); updateReview(); drawChart(); persistWorkspace();
     }
 
     function validateImage(file) {
@@ -505,7 +523,7 @@
       const zone = $(`${role}Paste`); zone.querySelector(".paste-placeholder").classList.remove("hidden");
       const img = zone.querySelector("img"); img.removeAttribute("src"); img.classList.add("hidden"); zone.querySelector(".geometry").classList.add("hidden");
       $(`${role}Recognize`).disabled = true; $(`${role}Clear`).disabled = true; $(`${role}Editor`).classList.add("hidden");
-      setBadge(`${role}Badge`, "等待截图"); setBox(`${role}Status`, ""); setActiveRole(role); updateSteps(); updateReview(); drawChart();
+      setBadge(`${role}Badge`, "等待截图"); setBox(`${role}Status`, ""); setActiveRole(role); updateSteps(); updateReview(); drawChart(); persistWorkspace();
     }
     function drawGeometry(role, geometry) {
       if (!geometry) return;
@@ -538,11 +556,12 @@
         app.lines[role] = result.line; app.geometries[role] = result.image_geometry || null;
         if (supportedTimeframes.has(result.detected_timeframe)) {
           app.detectedTimeframe = result.detected_timeframe;
+          app.timeframeMode = requestedTimeframe === "auto" ? "auto" : "manual";
           $("timeframe").value = result.detected_timeframe;
           app.timeframeNeedsRecognition = false;
           setTimeframeState(`已自动切换至 ${result.detected_timeframe}`, "ok");
         }
-        loadChart();
+        persistWorkspace(); loadChart();
         drawGeometry(role, app.geometries[role]); renderLineEditor(role);
         const low = Number(result.confidence) < .75;
         setBadge(`${role}Badge`, `${result.line.kind === "horizontal" ? "水平线" : "趋势线"} · ${Math.round(Number(result.confidence) * 100)}%`, low ? "warn" : "ok");
@@ -568,12 +587,12 @@
       $(`${role}Kind`).addEventListener("change", (event) => {
         const currentPrice = linePriceAt(line, Date.now()) || Number(app.candles.at(-1)?.close) || 1;
         app.lines[role] = event.target.value === "horizontal" ? { kind: "horizontal", price: currentPrice } : { kind: "trendline", ts1: Date.now() - 86400000, price1: currentPrice, ts2: Date.now(), price2: currentPrice };
-        renderLineEditor(role); updateReview(); drawChart();
+        renderLineEditor(role); updateReview(); drawChart(); persistWorkspace();
       });
       root.querySelectorAll("input").forEach((input) => input.addEventListener("input", () => {
         if (app.lines[role].kind === "horizontal") app.lines[role].price = Number($(`${role}Price`).value);
         else Object.assign(app.lines[role], { ts1: Number($(`${role}Ts1`).value), price1: Number($(`${role}P1`).value), ts2: Number($(`${role}Ts2`).value), price2: Number($(`${role}P2`).value) });
-        updateReview(); drawChart();
+        updateReview(); drawChart(); persistWorkspace();
       }));
     }
 
@@ -659,7 +678,7 @@
     const statusOrder = ["armed", "entering", "position_open", "exiting", "completed"];
     function renderStrategy(strategy) {
       app.currentStrategy = strategy; $("strategyIdLabel").textContent = strategy.strategy_id ? `ID ${strategy.strategy_id.slice(0, 12)}…` : "尚未启用";
-      if (supportedTimeframes.has(strategy.timeframe)) { app.detectedTimeframe = strategy.timeframe; const wasAuto = $("timeframe").value === "auto"; if (wasAuto) $("timeframe").value = strategy.timeframe; app.timeframeNeedsRecognition = false; refreshTimeframeState(); if (wasAuto) loadChart(); }
+      if (supportedTimeframes.has(strategy.timeframe)) { app.detectedTimeframe = strategy.timeframe; const wasAuto = $("timeframe").value === "auto"; if (wasAuto) { app.timeframeMode = "manual"; $("timeframe").value = strategy.timeframe; } app.timeframeNeedsRecognition = false; refreshTimeframeState(); if (wasAuto) loadChart(); }
       const bad = ["failed", "attention_required", "position_left_open"].includes(strategy.status); const done = ["completed", "cancelled"].includes(strategy.status);
       setBadge("strategyBadge", strategy.status.toUpperCase(), bad ? "error" : done ? "ok" : "warn");
       const feed = strategy.feed_state || "connecting"; $("feedPill").textContent = feed === "live" ? "实时行情已连接" : feed === "degraded" ? "Futures REST 降级行情" : feed === "reference" ? "模拟 · SPOT 参考行情" : feed === "stale" ? "行情已失联" : "正在连接行情"; $("feedPill").className = `live-pill ${feed === "live" || feed === "reference" ? "live" : feed === "stale" ? "stale" : ""}`;
@@ -692,6 +711,7 @@
     ["notional", "leverage", "timezone"].forEach((id) => $(id).addEventListener("input", updateReview));
     $("symbol").addEventListener("input", () => { updateReview(); clearTimeout(window.chartReloadTimer); window.chartReloadTimer = setTimeout(loadChart, 500); });
     $("timeframe").addEventListener("change", handleTimeframeChange);
+    $("chartExpand").addEventListener("click", () => persistWorkspace());
     $("reloadChart").onclick = loadChart; $("armStrategy").onclick = openConfirm; $("confirmBack").onclick = () => $("confirmDialog").close(); $("confirmArm").onclick = armStrategy; $("liveConfirm").onchange = () => { $("confirmArm").disabled = !$("liveConfirm").checked; };
     $("cancelStrategy").onclick = () => { const open = ["position_open", "exiting"].includes(app.currentStrategy?.status); if (!open) return cancelStrategy(false); $("cancelMessage").textContent = app.currentStrategy?.stop_line ? "策略已经入场。停止监控会让仓位失去这条止损保护，请明确选择。" : "策略已经入场且未设置自动止损，请明确选择保留仓位或立即市价平仓。"; $("cancelDialog").showModal(); };
     $("cancelBack").onclick = () => $("cancelDialog").close(); $("leavePosition").onclick = () => cancelStrategy(false); $("closePosition").onclick = () => cancelStrategy(true);
