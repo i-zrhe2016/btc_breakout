@@ -145,6 +145,34 @@ class StrategyRuntimeTests(unittest.TestCase):
         loaded = main.get_bark_settings()
         self.assertEqual(loaded, saved)
 
+    def test_simulated_strategy_uses_spot_reference_when_futures_price_is_blocked(self):
+        payload = main.FuturesStrategyRequest(
+            direction="LONG",
+            notional_usdt=100,
+            entry_line={"kind": "horizontal", "price": 80000},
+        )
+        with patch.object(main, "fetch_futures_price", side_effect=RuntimeError("HTTP 451")), patch.object(
+            main, "fetch_spot_reference_price", return_value=79000
+        ), patch.object(main, "start_strategy_thread"):
+            result = main.create_futures_strategy(payload)
+        self.assertEqual(result["status"], "armed")
+        self.assertEqual(result["current_price"], 79000)
+
+    def test_live_strategy_checks_configuration_before_market_price(self):
+        payload = main.FuturesStrategyRequest(
+            direction="LONG",
+            notional_usdt=100,
+            mode="live",
+            entry_line={"kind": "horizontal", "price": 80000},
+        )
+        with patch.object(main, "live_strategy_preflight", side_effect=ValueError("live futures 未启用")), patch.object(
+            main, "fetch_futures_price"
+        ) as price:
+            with self.assertRaises(main.HTTPException) as caught:
+                main.create_futures_strategy(payload)
+        self.assertEqual(caught.exception.status_code, 400)
+        price.assert_not_called()
+
     def test_short_supports_trendline_entry_and_stop(self):
         now = int(time.time() * 1000)
         payload = main.FuturesStrategyRequest(

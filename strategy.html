@@ -237,9 +237,9 @@
     </div>
     <nav aria-label="主导航">
       <a class="active" href="/">双线策略</a>
+      <a href="/recognition">识别参数</a>
+      <a href="/preview">K线预览</a>
       <a href="/settings">通知设置</a>
-      <a href="/manual">手动画线</a>
-      <a href="/ai">单图识别</a>
     </nav>
   </header>
 
@@ -623,7 +623,7 @@
       app.currentStrategy = strategy; $("strategyIdLabel").textContent = strategy.strategy_id ? `ID ${strategy.strategy_id.slice(0, 12)}…` : "尚未启用";
       const bad = ["failed", "attention_required", "position_left_open"].includes(strategy.status); const done = ["completed", "cancelled"].includes(strategy.status);
       setBadge("strategyBadge", strategy.status.toUpperCase(), bad ? "error" : done ? "ok" : "warn");
-      const feed = strategy.feed_state || "connecting"; $("feedPill").textContent = feed === "live" ? "实时行情已连接" : feed === "degraded" ? "REST 降级行情" : feed === "stale" ? "行情已失联" : "正在连接行情"; $("feedPill").className = `live-pill ${feed === "live" ? "live" : feed === "stale" ? "stale" : ""}`;
+      const feed = strategy.feed_state || "connecting"; $("feedPill").textContent = feed === "live" ? "实时行情已连接" : feed === "degraded" ? "Futures REST 降级行情" : feed === "reference" ? "模拟 · SPOT 参考行情" : feed === "stale" ? "行情已失联" : "正在连接行情"; $("feedPill").className = `live-pill ${feed === "live" || feed === "reference" ? "live" : feed === "stale" ? "stale" : ""}`;
       const index = statusOrder.indexOf(strategy.status); $("timeline").querySelectorAll("li").forEach((li, i) => { li.classList.toggle("done", index > i || strategy.status === "completed"); li.classList.toggle("current", index === i && !terminalStatuses.has(strategy.status)); });
       const stopStatus = strategy.stop_line ? `止损线 ${formatPrice(strategy.stop_line_price)}` : "止损线 未启用（需手动平仓）";
       setBox("monitorStatus", strategy.error ? `需要处理：${strategy.error}` : `当前价格 ${formatPrice(strategy.current_price)}\n入场线 ${formatPrice(strategy.entry_line_price)} · ${stopStatus}${strategy.entry_price ? `\n入场均价 ${formatPrice(strategy.entry_price)} · 数量 ${formatPrice(strategy.filled_qty)}` : ""}`, strategy.error ? "error" : "info");

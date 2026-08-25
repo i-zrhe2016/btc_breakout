@@ -24,6 +24,8 @@ COPY main.py /app/main.py
 COPY 1.html /app/1.html
 COPY strategy.html /app/strategy.html
 COPY settings.html /app/settings.html
+COPY recognition.html /app/recognition.html
+COPY preview.html /app/preview.html
 COPY CODEX_PROMPT.md /app/CODEX_PROMPT.md
 
 EXPOSE 8000

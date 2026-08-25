@@ -42,6 +42,8 @@ docker compose logs -f api
 入口：
 
 - 新策略工作台：`http://127.0.0.1:8000/`
+- 趋势线识别参数：`http://127.0.0.1:8000/recognition`
+- K 线与趋势线预览：`http://127.0.0.1:8000/preview`
 - Bark 通知设置：`http://127.0.0.1:8000/settings`
 - 旧版手动画线：`http://127.0.0.1:8000/manual`
 - 旧版单截图识别：`http://127.0.0.1:8000/ai`

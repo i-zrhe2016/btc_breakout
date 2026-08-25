@@ -47,6 +47,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 WEB_ENTRY = ROOT_DIR / "1.html"
 STRATEGY_WEB_ENTRY = ROOT_DIR / "strategy.html"
 SETTINGS_WEB_ENTRY = ROOT_DIR / "settings.html"
+RECOGNITION_WEB_ENTRY = ROOT_DIR / "recognition.html"
+PREVIEW_WEB_ENTRY = ROOT_DIR / "preview.html"
 INTERVAL_TO_MS = {
     "1m": 60 * 1000,
     "3m": 3 * 60 * 1000,
@@ -3130,6 +3132,22 @@ def serve_settings_ui():
     return FileResponse(SETTINGS_WEB_ENTRY)
 
 
+@app.get("/recognition", include_in_schema=False)
+@app.head("/recognition", include_in_schema=False)
+def serve_recognition_ui():
+    if not RECOGNITION_WEB_ENTRY.exists():
+        raise HTTPException(status_code=404, detail="recognition.html not found")
+    return FileResponse(RECOGNITION_WEB_ENTRY)
+
+
+@app.get("/preview", include_in_schema=False)
+@app.head("/preview", include_in_schema=False)
+def serve_preview_ui():
+    if not PREVIEW_WEB_ENTRY.exists():
+        raise HTTPException(status_code=404, detail="preview.html not found")
+    return FileResponse(PREVIEW_WEB_ENTRY)
+
+
 @app.post("/ai/recognize")
 def ai_recognize(payload: AiRecognitionRequest):
     try:
@@ -3613,8 +3631,26 @@ def fetch_futures_price(symbol: str) -> float:
     return float(data["price"])
 
 
-def fetch_futures_klines(symbol: str, timeframe: str, limit: int = 500) -> list[dict[str, Any]]:
+def fetch_spot_reference_price(symbol: str) -> float:
+    data = request_json(
+        "https://data-api.binance.vision/api/v3/ticker/price?" + urlencode({"symbol": symbol}),
+        timeout=10,
+    )
+    return float(data["price"])
+
+
+def fetch_futures_klines(
+    symbol: str,
+    timeframe: str,
+    limit: int = 500,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
+) -> list[dict[str, Any]]:
     params = {"symbol": symbol, "interval": timeframe, "limit": max(10, min(limit, 500))}
+    if start_time is not None:
+        params["startTime"] = int(start_time)
+    if end_time is not None:
+        params["endTime"] = int(end_time)
     configured = get_futures_base_url()
     bases = [configured]
     if configured == "https://fapi.binance.com":
@@ -3893,10 +3929,19 @@ def strategy_price_stream(state: FuturesStrategyState):
                 stale_since = None
                 yield price, int(time.time() * 1000), "degraded"
             except Exception as rest_exc:
-                state.feed_state = "stale"
-                state.error = f"行情暂时不可用: {rest_exc}"
+                if state.payload.mode == "simulate":
+                    try:
+                        price = fetch_spot_reference_price(state.payload.symbol)
+                        stale_since = None
+                        yield price, int(time.time() * 1000), "reference"
+                    except Exception as spot_exc:
+                        state.feed_state = "stale"
+                        state.error = f"行情暂时不可用: {spot_exc}"
+                else:
+                    state.feed_state = "stale"
+                    state.error = f"行情暂时不可用: {rest_exc}"
                 if stale_since and time.monotonic() - stale_since >= 5:
-                    add_strategy_event(state, "market_data_stale", "行情超过 5 秒未更新", error=str(rest_exc))
+                    add_strategy_event(state, "market_data_stale", "行情超过 5 秒未更新", error=state.error)
             state.cancel_event.wait(1)
 
 
@@ -4054,11 +4099,17 @@ def ai_line_recognize(payload: LineRecognitionRequest):
 
 
 @app.get("/market/klines")
-def market_klines(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 500):
+def market_klines(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "1h",
+    limit: int = 500,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
+):
     if timeframe not in INTERVAL_TO_MS:
         raise HTTPException(status_code=400, detail="unsupported timeframe")
     try:
-        return fetch_futures_klines(symbol.strip().upper(), timeframe, limit)
+        return fetch_futures_klines(symbol.strip().upper(), timeframe, limit, start_time, end_time)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -4098,11 +4149,16 @@ def create_futures_strategy(payload: FuturesStrategyRequest):
         ) and payload.mode == "live":
             raise HTTPException(status_code=409, detail=f"{payload.symbol} 已有活动 live 策略")
     try:
-        current_price = fetch_futures_price(payload.symbol)
-        now = int(time.time() * 1000)
-        entry_line_price, stop_line_price = validate_stop_side(payload, current_price, now)
         if payload.mode == "live":
             live_strategy_preflight(payload, configure=False)
+            current_price = fetch_futures_price(payload.symbol)
+        else:
+            try:
+                current_price = fetch_futures_price(payload.symbol)
+            except Exception:
+                current_price = fetch_spot_reference_price(payload.symbol)
+        now = int(time.time() * 1000)
+        entry_line_price, stop_line_price = validate_stop_side(payload, current_price, now)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
