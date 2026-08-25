@@ -82,7 +82,7 @@
     }
     nav a.active { color: var(--text); border-color: var(--cyan); background: var(--cyan-soft); }
 
-    main { max-width: 1600px; margin: 0 auto; padding: 22px 24px 48px; }
+    main { max-width: 1800px; margin: 0 auto; padding: 22px 24px 48px; }
     .hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
     .eyebrow { color: var(--cyan); font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; }
     h1 { margin: 4px 0 4px; font-size: clamp(24px, 3vw, 38px); line-height: 1.2; }
@@ -98,7 +98,7 @@
     .step.active { color: var(--text); border-color: var(--cyan); background: var(--cyan-soft); }
     .step.done { color: #bbf7d0; border-color: rgba(34, 197, 94, .45); }
 
-    .workspace { display: grid; grid-template-columns: minmax(310px, .82fr) minmax(420px, 1.4fr) minmax(300px, .78fr); gap: 16px; align-items: start; }
+    .workspace { display: grid; grid-template-columns: minmax(350px, .7fr) minmax(760px, 1.8fr) minmax(350px, .7fr); gap: 16px; align-items: start; }
     .stack { display: grid; gap: 16px; }
     .panel { background: linear-gradient(180deg, rgba(17, 24, 39, .97), rgba(11, 17, 32, .97)); border: 1px solid var(--border-soft); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
     .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 16px 12px; border-bottom: 1px solid var(--border-soft); }
@@ -159,8 +159,10 @@
     button:disabled { opacity: .45; cursor: not-allowed; }
     .wide { width: 100%; }
 
-    .chart-wrap { position: relative; min-height: 540px; background: #02050c; }
-    #chart { width: 100%; height: 540px; display: block; }
+    .chart-wrap { position: relative; min-height: 660px; background: #02050c; }
+    #chart { width: 100%; height: 660px; display: block; }
+    .chart-expand { min-height: 44px; display: inline-flex; align-items: center; padding: 9px 13px; border: 1px solid var(--border-soft); border-radius: 9px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+    .chart-expand:hover { color: var(--text); border-color: var(--cyan); background: var(--cyan-soft); }
     .chart-legend { position: absolute; top: 12px; left: 12px; display: flex; gap: 10px; flex-wrap: wrap; pointer-events: none; }
     .legend-item { background: rgba(2, 6, 23, .85); border: 1px solid var(--border-soft); border-radius: 8px; padding: 5px 8px; font-size: 11px; color: var(--muted); }
     .legend-line { display: inline-block; width: 18px; border-top: 2px solid var(--cyan); margin-right: 6px; vertical-align: middle; }
@@ -200,8 +202,8 @@
     .confirm-check input { width: 18px; min-height: 18px; margin-top: 2px; }
     .dialog-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
 
-    @media (max-width: 1180px) {
-      .workspace { grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.3fr); }
+    @media (max-width: 1450px) {
+      .workspace { grid-template-columns: minmax(320px, .85fr) minmax(640px, 1.5fr); }
       .right-column { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 780px) {
@@ -213,7 +215,7 @@
       .steps { grid-template-columns: 1fr 1fr; }
       .workspace { grid-template-columns: 1fr; }
       .right-column { grid-column: auto; grid-template-columns: 1fr; }
-      .chart-wrap, #chart { min-height: 430px; height: 430px; }
+      .chart-wrap, #chart { min-height: 500px; height: 500px; }
       .metric-grid { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 430px) {
@@ -319,7 +321,7 @@
       </div>
 
       <section class="panel chart-panel" aria-labelledby="chartTitle">
-        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>识别后立即回画；左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button></div></div>
+        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>大画布显示识别结果；左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button><a class="chart-expand" href="/preview">打开大画布</a></div></div>
         <div class="chart-wrap">
           <canvas id="chart" role="img" aria-label="BTC 合约 K 线、入场线与止损线预览；下方提供当前价格和两条线的文字数值"></canvas>
           <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span id="stopLegend" class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
