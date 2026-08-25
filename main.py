@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -25,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from PIL import Image, ImageDraw, ImageFont
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 app = FastAPI(title="Trendline Breakout API", version="0.1.0")
@@ -44,6 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger("trendline_api")
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_ENTRY = ROOT_DIR / "1.html"
+STRATEGY_WEB_ENTRY = ROOT_DIR / "strategy.html"
 INTERVAL_TO_MS = {
     "1m": 60 * 1000,
     "3m": 3 * 60 * 1000,
@@ -3062,8 +3064,6 @@ def healthz() -> Response:
     return Response(status_code=200)
 
 
-@app.get("/", include_in_schema=False)
-@app.head("/", include_in_schema=False)
 @app.get("/manual", include_in_schema=False)
 @app.head("/manual", include_in_schema=False)
 @app.get("/ai", include_in_schema=False)
@@ -3072,6 +3072,16 @@ def serve_ui():
     if not WEB_ENTRY.exists():
         raise HTTPException(status_code=404, detail="1.html not found")
     return FileResponse(WEB_ENTRY)
+
+
+@app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
+@app.get("/strategy", include_in_schema=False)
+@app.head("/strategy", include_in_schema=False)
+def serve_strategy_ui():
+    if not STRATEGY_WEB_ENTRY.exists():
+        raise HTTPException(status_code=404, detail="strategy.html not found")
+    return FileResponse(STRATEGY_WEB_ENTRY)
 
 
 @app.post("/ai/recognize")
@@ -3124,3 +3134,799 @@ def signal_watch_status(job_id: str):
             error=job.error,
             result=job.result,
         )
+
+
+# ---------------------------------------------------------------------------
+# Two-image futures strategy builder
+# ---------------------------------------------------------------------------
+
+FUTURES_STRATEGY_STATUSES = {
+    "armed",
+    "entering",
+    "position_open",
+    "exiting",
+    "completed",
+    "cancelled",
+    "position_left_open",
+    "failed",
+    "attention_required",
+}
+ACTIVE_FUTURES_STRATEGY_STATUSES = {"armed", "entering", "position_open", "exiting"}
+
+
+class LineSpec(BaseModel):
+    kind: Literal["horizontal", "trendline"]
+    price: Optional[float] = Field(None, gt=0)
+    ts1: Optional[int] = None
+    price1: Optional[float] = Field(None, gt=0)
+    ts2: Optional[int] = None
+    price2: Optional[float] = Field(None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_shape(self):
+        if self.kind == "horizontal":
+            if self.price is None:
+                raise ValueError("horizontal line requires price")
+            return self
+        required = (self.ts1, self.price1, self.ts2, self.price2)
+        if any(value is None for value in required):
+            raise ValueError("trendline requires ts1, price1, ts2 and price2")
+        if self.ts1 == self.ts2:
+            raise ValueError("trendline ts1 and ts2 must differ")
+        return self
+
+    def price_at(self, ts_ms: int) -> float:
+        if self.kind == "horizontal":
+            return float(self.price)
+        return float(self.price1) + (float(self.price2) - float(self.price1)) * (
+            (ts_ms - int(self.ts1)) / (int(self.ts2) - int(self.ts1))
+        )
+
+
+class LineRecognitionRequest(AiRecognitionInputs):
+    image_data_url: str = Field(..., min_length=1)
+    role: Literal["entry", "stop"]
+    expected_line_type: Literal["auto", "horizontal", "trendline"] = "auto"
+
+
+class FuturesStrategyRequest(BaseModel):
+    symbol: str = Field("BTCUSDT", min_length=3)
+    timeframe: str = Field("1h", min_length=1)
+    chart_timezone: str = Field("UTC", min_length=1)
+    direction: Literal["LONG", "SHORT"]
+    notional_usdt: float = Field(..., gt=0)
+    leverage: int = Field(1, ge=1, le=125)
+    mode: Literal["simulate", "live"] = "simulate"
+    entry_line: LineSpec
+    stop_line: LineSpec
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_strategy_symbol(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("timeframe")
+    @classmethod
+    def normalize_strategy_timeframe(cls, value: str) -> str:
+        value = value.strip()
+        if value not in INTERVAL_TO_MS:
+            raise ValueError("unsupported timeframe")
+        return value
+
+    @field_validator("chart_timezone")
+    @classmethod
+    def validate_strategy_timezone(cls, value: str) -> str:
+        value = value.strip() or "UTC"
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"invalid chart_timezone: {value}") from exc
+        return value
+
+
+@dataclass
+class FuturesStrategyState:
+    strategy_id: str
+    payload: FuturesStrategyRequest
+    status: str
+    created_ts: int
+    updated_ts: int
+    current_price: Optional[float] = None
+    current_price_ts: Optional[int] = None
+    entry_line_price: Optional[float] = None
+    stop_line_price: Optional[float] = None
+    feed_state: str = "connecting"
+    filled_qty: Optional[float] = None
+    entry_price: Optional[float] = None
+    exit_price: Optional[float] = None
+    entry_order: Optional[dict[str, Any]] = None
+    exit_order: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    close_on_cancel: Optional[bool] = None
+    restored: bool = False
+    last_persist_monotonic: float = field(default=0.0, repr=False)
+
+
+FUTURES_STRATEGIES: dict[str, FuturesStrategyState] = {}
+FUTURES_STRATEGIES_LOCK = threading.Lock()
+FUTURES_DB_LOCK = threading.Lock()
+
+
+LINE_RECOGNITION_SCHEMA: dict[str, Any] = {
+    "name": "chart_line_recognition",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["ready", "confidence", "line_type", "horizontal_price", "anchors", "image_geometry", "notes"],
+        "properties": {
+            "ready": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "line_type": {"type": "string", "enum": ["horizontal", "trendline", "unknown"]},
+            "horizontal_price": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+            "anchors": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["time_iso", "timestamp_ms", "price"],
+                    "properties": {
+                        "time_iso": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "timestamp_ms": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                        "price": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+                    },
+                },
+            },
+            "image_geometry": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["x1", "y1", "x2", "y2"],
+                "properties": {
+                    "x1": {"type": "number", "minimum": 0, "maximum": 1},
+                    "y1": {"type": "number", "minimum": 0, "maximum": 1},
+                    "x2": {"type": "number", "minimum": 0, "maximum": 1},
+                    "y2": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+            },
+            "notes": {"type": "string"},
+        },
+    },
+}
+
+
+def get_futures_base_url() -> str:
+    return str(os.getenv("BINANCE_FUTURES_BASE_URL") or "https://fapi.binance.com").rstrip("/")
+
+
+def get_futures_ws_url(symbol: str) -> str:
+    configured = str(os.getenv("BINANCE_FUTURES_WS_URL") or "wss://fstream.binance.com/ws").rstrip("/")
+    return f"{configured}/{symbol.lower()}@aggTrade"
+
+
+def get_strategy_db_path() -> Path:
+    raw = str(os.getenv("STRATEGY_DB_PATH") or (ROOT_DIR / "strategy_state.db"))
+    return Path(raw).expanduser().resolve()
+
+
+def init_strategy_db() -> None:
+    path = get_strategy_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FUTURES_DB_LOCK, sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS futures_strategies (
+                strategy_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_ts INTEGER NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def strategy_public_dict(state: FuturesStrategyState) -> dict[str, Any]:
+    return {
+        "strategy_id": state.strategy_id,
+        "status": state.status,
+        "created_ts": state.created_ts,
+        "updated_ts": state.updated_ts,
+        "symbol": state.payload.symbol,
+        "timeframe": state.payload.timeframe,
+        "direction": state.payload.direction,
+        "notional_usdt": state.payload.notional_usdt,
+        "leverage": state.payload.leverage,
+        "margin_type": "CROSSED",
+        "mode": state.payload.mode,
+        "entry_line": state.payload.entry_line.model_dump(),
+        "stop_line": state.payload.stop_line.model_dump(),
+        "current_price": state.current_price,
+        "current_price_ts": state.current_price_ts,
+        "entry_line_price": state.entry_line_price,
+        "stop_line_price": state.stop_line_price,
+        "feed_state": state.feed_state,
+        "filled_qty": state.filled_qty,
+        "entry_price": state.entry_price,
+        "exit_price": state.exit_price,
+        "entry_order": state.entry_order,
+        "exit_order": state.exit_order,
+        "error": state.error,
+        "events": state.events[-100:],
+    }
+
+
+def persist_strategy(state: FuturesStrategyState) -> None:
+    init_strategy_db()
+    snapshot = strategy_public_dict(state)
+    with FUTURES_DB_LOCK, sqlite3.connect(get_strategy_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO futures_strategies(strategy_id, payload_json, state_json, status, updated_ts)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(strategy_id) DO UPDATE SET
+              payload_json=excluded.payload_json,
+              state_json=excluded.state_json,
+              status=excluded.status,
+              updated_ts=excluded.updated_ts
+            """,
+            (
+                state.strategy_id,
+                state.payload.model_dump_json(),
+                json.dumps(snapshot, ensure_ascii=False),
+                state.status,
+                state.updated_ts,
+            ),
+        )
+        conn.commit()
+
+
+def add_strategy_event(state: FuturesStrategyState, event_type: str, message: str, **details: Any) -> None:
+    now = int(time.time() * 1000)
+    state.updated_ts = now
+    state.events.append({"ts": now, "type": event_type, "message": message, "details": details})
+    state.events = state.events[-200:]
+    persist_strategy(state)
+
+
+def update_strategy_status(state: FuturesStrategyState, status: str, message: str, **details: Any) -> None:
+    if status not in FUTURES_STRATEGY_STATUSES:
+        raise ValueError(f"invalid strategy status: {status}")
+    state.status = status
+    add_strategy_event(state, "status", message, status=status, **details)
+
+
+def futures_public_json(path: str, params: Optional[dict[str, Any]] = None) -> Any:
+    url = f"{get_futures_base_url()}{path}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    return request_json(url, timeout=10)
+
+
+def futures_signed_json(path: str, *, method: str = "GET", params: Optional[dict[str, Any]] = None) -> Any:
+    api_key = str(os.getenv("BINANCE_API_KEY") or "").strip()
+    api_secret = str(os.getenv("BINANCE_API_SECRET") or "").strip()
+    if not api_key or not api_secret:
+        raise RuntimeError("live mode requires BINANCE_API_KEY and BINANCE_API_SECRET")
+    signed = {str(k): v for k, v in (params or {}).items() if v is not None}
+    signed["timestamp"] = int(time.time() * 1000)
+    signed["recvWindow"] = 5000
+    query = urlencode(signed)
+    signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    body = f"{query}&signature={signature}".encode()
+    url = f"{get_futures_base_url()}{path}"
+    if method == "GET":
+        url = f"{url}?{body.decode()}"
+        data = None
+    else:
+        data = body
+    req = Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "X-MBX-APIKEY": api_key,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "trendline-api/0.2",
+        },
+    )
+    try:
+        with urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise RuntimeError(f"Binance Futures HTTP {exc.code}: {detail or exc.reason}") from exc
+
+
+def fetch_futures_price(symbol: str) -> float:
+    data = futures_public_json("/fapi/v1/ticker/price", {"symbol": symbol})
+    return float(data["price"])
+
+
+def fetch_futures_klines(symbol: str, timeframe: str, limit: int = 500) -> list[dict[str, Any]]:
+    raw = futures_public_json(
+        "/fapi/v1/klines",
+        {"symbol": symbol, "interval": timeframe, "limit": max(10, min(limit, 500))},
+    )
+    return [
+        {"ts": int(item[0]), "open": float(item[1]), "high": float(item[2]), "low": float(item[3]), "close": float(item[4])}
+        for item in raw
+    ]
+
+
+def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
+    image_bytes, image_type = decode_image_data_url(payload.image_data_url)
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise ValueError("截图不能超过 10MB")
+    api_key = str(os.getenv("OPENROUTER_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY 未配置")
+    image_url = f"data:{image_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    prompt = "\n".join(
+        [
+            "识别截图中用于自动交易的唯一一条人工绘制线。只输出严格 JSON。",
+            f"用途: {payload.role}；期望线型: {payload.expected_line_type}。",
+            f"symbol={payload.symbol}, timeframe={payload.timeframe}, chart_timezone={payload.chart_timezone}。",
+            f"目标提示: {payload.target_line_hint or '无'}。",
+            "水平线返回 horizontal_price；趋势线返回两个最接近实际锚点的 anchors。",
+            "image_geometry 是线段在整张图片中的归一化端点，左上角为 (0,0)，右下角为 (1,1)。",
+            "忽略 K 线、均线、网格、十字光标、订单标记和价格轴边框。",
+        ]
+    )
+    body = {
+        "model": str(os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL),
+        "temperature": 0,
+        "max_tokens": 1000,
+        "plugins": [{"id": "response-healing"}],
+        "response_format": {"type": "json_schema", "json_schema": LINE_RECOGNITION_SCHEMA},
+        "messages": [
+            {"role": "system", "content": "你是严谨的金融图表线段识别器。"},
+            {"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]},
+        ],
+    }
+    response = request_json(
+        str(os.getenv("OPENROUTER_API_URL") or DEFAULT_OPENROUTER_API_URL),
+        method="POST",
+        payload=body,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=120,
+    )
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not choices:
+        raise RuntimeError("OpenRouter 响应缺少 choices")
+    message = choices[0].get("message") or {}
+    parsed = message.get("parsed") if isinstance(message, dict) else None
+    if not isinstance(parsed, dict):
+        parsed = extract_json_object(message_content_to_text(message.get("content")))
+
+    expected = payload.expected_line_type
+    line_type = parsed.get("line_type")
+    if expected != "auto":
+        line_type = expected
+    confidence = max(0.0, min(1.0, float(parsed.get("confidence") or 0)))
+    line: Optional[LineSpec] = None
+    if line_type == "horizontal":
+        price = to_finite_number(parsed.get("horizontal_price"))
+        if price is None:
+            anchor_prices = [to_finite_number(item.get("price")) for item in parsed.get("anchors", []) if isinstance(item, dict)]
+            anchor_prices = [item for item in anchor_prices if item is not None]
+            if anchor_prices:
+                price = sum(anchor_prices) / len(anchor_prices)
+        if price and price > 0:
+            line = LineSpec(kind="horizontal", price=price)
+    elif line_type == "trendline":
+        anchors = parsed.get("anchors") if isinstance(parsed.get("anchors"), list) else []
+        if len(anchors) >= 2:
+            ts1 = to_int(anchors[0].get("timestamp_ms"))
+            ts2 = to_int(anchors[1].get("timestamp_ms"))
+            price1 = to_finite_number(anchors[0].get("price"))
+            price2 = to_finite_number(anchors[1].get("price"))
+            if ts1 is not None and ts2 is not None and ts1 != ts2 and price1 and price2:
+                if ts1 > ts2:
+                    ts1, ts2, price1, price2 = ts2, ts1, price2, price1
+                line = LineSpec(kind="trendline", ts1=ts1, price1=price1, ts2=ts2, price2=price2)
+    return {
+        "ready_for_strategy": bool(parsed.get("ready")) and line is not None,
+        "confidence": confidence,
+        "role": payload.role,
+        "symbol": payload.symbol,
+        "timeframe": payload.timeframe,
+        "line": line.model_dump() if line else None,
+        "image_geometry": parsed.get("image_geometry"),
+        "notes": str(parsed.get("notes") or ""),
+    }
+
+
+def validate_stop_side(payload: FuturesStrategyRequest, current_price: float, ts_ms: int) -> tuple[float, float]:
+    entry_price = payload.entry_line.price_at(ts_ms)
+    stop_price = payload.stop_line.price_at(ts_ms)
+    if payload.direction == "LONG" and stop_price >= current_price:
+        raise ValueError("LONG 止损线必须低于当前价格")
+    if payload.direction == "SHORT" and stop_price <= current_price:
+        raise ValueError("SHORT 止损线必须高于当前价格")
+    return entry_price, stop_price
+
+
+def live_strategy_preflight(payload: FuturesStrategyRequest, *, configure: bool = False) -> None:
+    if str(os.getenv("ENABLE_LIVE_FUTURES") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise ValueError("live futures 未启用；请设置 ENABLE_LIVE_FUTURES=true")
+    position_mode = futures_signed_json("/fapi/v1/positionSide/dual")
+    if bool(position_mode.get("dualSidePosition")):
+        raise ValueError("live v1 仅支持 Binance One-way Mode")
+    positions = futures_signed_json("/fapi/v2/positionRisk", params={"symbol": payload.symbol})
+    if any(abs(float(item.get("positionAmt") or 0)) > 0 for item in positions if isinstance(item, dict)):
+        raise ValueError(f"{payload.symbol} 已有持仓，不能启用独占策略")
+    orders = futures_signed_json("/fapi/v1/openOrders", params={"symbol": payload.symbol})
+    if orders:
+        raise ValueError(f"{payload.symbol} 存在未完成订单，不能启用独占策略")
+    if configure:
+        try:
+            futures_signed_json("/fapi/v1/marginType", method="POST", params={"symbol": payload.symbol, "marginType": "CROSSED"})
+        except RuntimeError as exc:
+            if "-4046" not in str(exc):
+                raise
+        futures_signed_json("/fapi/v1/leverage", method="POST", params={"symbol": payload.symbol, "leverage": payload.leverage})
+
+
+def get_symbol_quantity_rules(symbol: str) -> tuple[float, float, float]:
+    info = futures_public_json("/fapi/v1/exchangeInfo")
+    item = next((row for row in info.get("symbols", []) if row.get("symbol") == symbol), None)
+    if not item:
+        raise ValueError(f"unknown futures symbol: {symbol}")
+    filters = {entry.get("filterType"): entry for entry in item.get("filters", [])}
+    lot = filters.get("MARKET_LOT_SIZE") or filters.get("LOT_SIZE") or {}
+    notional = filters.get("MIN_NOTIONAL") or {}
+    return float(lot.get("stepSize") or 0.001), float(lot.get("minQty") or 0.001), float(notional.get("notional") or 5)
+
+
+def normalize_futures_quantity(symbol: str, notional_usdt: float, price: float) -> float:
+    step, min_qty, min_notional = get_symbol_quantity_rules(symbol)
+    raw = notional_usdt / price
+    qty = math.floor((raw + 1e-12) / step) * step
+    decimals = max(0, len(f"{step:.12f}".rstrip("0").partition(".")[2]))
+    qty = round(qty, decimals)
+    if qty < min_qty or qty * price < min_notional:
+        raise ValueError("名义仓位低于 Binance 最小下单限制")
+    return qty
+
+
+def get_live_position_amount(symbol: str) -> float:
+    positions = futures_signed_json("/fapi/v2/positionRisk", params={"symbol": symbol})
+    if isinstance(positions, dict):
+        positions = [positions]
+    item = next((row for row in positions if isinstance(row, dict) and row.get("symbol") == symbol), None)
+    return float((item or {}).get("positionAmt") or 0)
+
+
+def reconcile_restored_live_position(state: FuturesStrategyState) -> None:
+    amount = get_live_position_amount(state.payload.symbol)
+    expected_sign = 1 if state.payload.direction == "LONG" else -1
+    if amount == 0 or (amount > 0) != (expected_sign > 0):
+        raise RuntimeError("重启恢复时 Binance 实际持仓与策略方向不一致，请人工核对")
+    actual_qty = abs(amount)
+    if state.filled_qty and actual_qty + 1e-12 < state.filled_qty:
+        add_strategy_event(
+            state,
+            "position_reconciled",
+            "Binance 实际持仓小于本地记录，已按实际数量继续保护",
+            recorded_quantity=state.filled_qty,
+            actual_quantity=actual_qty,
+        )
+    state.filled_qty = actual_qty
+
+
+def submit_futures_market_order(state: FuturesStrategyState, *, closing: bool, reference_price: float) -> dict[str, Any]:
+    payload = state.payload
+    side = ("SELL" if payload.direction == "LONG" else "BUY") if closing else ("BUY" if payload.direction == "LONG" else "SELL")
+    if closing:
+        live_amount = get_live_position_amount(payload.symbol)
+        expected_positive = payload.direction == "LONG"
+        if live_amount == 0 or (live_amount > 0) != expected_positive:
+            raise RuntimeError("Binance 实际持仓为空或方向不一致，未提交自动平仓单")
+        qty = min(float(state.filled_qty or abs(live_amount)), abs(live_amount))
+    else:
+        qty = normalize_futures_quantity(payload.symbol, payload.notional_usdt, reference_price)
+    if not qty:
+        raise RuntimeError("futures order quantity is empty")
+    suffix = "exit" if closing else "entry"
+    client_id = f"btcbo-{state.strategy_id[:20]}-{suffix}"[:36]
+    params: dict[str, Any] = {
+        "symbol": payload.symbol,
+        "side": side,
+        "positionSide": "BOTH",
+        "type": "MARKET",
+        "quantity": _format_order_qty(float(qty)),
+        "newClientOrderId": client_id,
+        "newOrderRespType": "RESULT",
+    }
+    if closing:
+        params["reduceOnly"] = "true"
+    try:
+        return futures_signed_json("/fapi/v1/order", method="POST", params=params)
+    except RuntimeError:
+        try:
+            existing = futures_signed_json(
+                "/fapi/v1/order",
+                params={"symbol": payload.symbol, "origClientOrderId": client_id},
+            )
+        except Exception:
+            raise
+        if existing and existing.get("orderId"):
+            return existing
+        raise
+
+
+def order_fill_values(order: dict[str, Any], fallback_price: float, fallback_qty: float) -> tuple[float, float]:
+    qty = to_finite_number(order.get("executedQty")) or fallback_qty
+    price = to_finite_number(order.get("avgPrice")) or fallback_price
+    return float(qty), float(price)
+
+
+def strategy_price_stream(state: FuturesStrategyState):
+    stale_since: Optional[float] = None
+    while not state.cancel_event.is_set():
+        ws = None
+        try:
+            import websocket  # type: ignore
+
+            ws = websocket.create_connection(get_futures_ws_url(state.payload.symbol), timeout=3)
+            state.feed_state = "live"
+            stale_since = None
+            while not state.cancel_event.is_set():
+                event = json.loads(ws.recv())
+                price = to_finite_number(event.get("p"))
+                event_ts = to_int(event.get("T")) or int(time.time() * 1000)
+                if price and price > 0:
+                    yield float(price), event_ts, "live"
+        except Exception as exc:
+            logger.warning("Futures websocket unavailable for %s: %s", state.payload.symbol, exc)
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if stale_since is None:
+                stale_since = time.monotonic()
+            try:
+                price = fetch_futures_price(state.payload.symbol)
+                stale_since = None
+                yield price, int(time.time() * 1000), "degraded"
+            except Exception as rest_exc:
+                state.feed_state = "stale"
+                state.error = f"行情暂时不可用: {rest_exc}"
+                if stale_since and time.monotonic() - stale_since >= 5:
+                    add_strategy_event(state, "market_data_stale", "行情超过 5 秒未更新", error=str(rest_exc))
+            state.cancel_event.wait(1)
+
+
+def should_enter(payload: FuturesStrategyRequest, current_price: float, line_price: float) -> bool:
+    return current_price >= line_price if payload.direction == "LONG" else current_price <= line_price
+
+
+def should_stop(payload: FuturesStrategyRequest, current_price: float, line_price: float) -> bool:
+    return current_price <= line_price if payload.direction == "LONG" else current_price >= line_price
+
+
+def close_strategy_position(state: FuturesStrategyState, current_price: float, *, cancelled: bool = False) -> None:
+    update_strategy_status(state, "exiting", "正在提交 reduce-only 市价平仓")
+    if state.payload.mode == "live":
+        order = submit_futures_market_order(state, closing=True, reference_price=current_price)
+        state.exit_order = order
+        _, state.exit_price = order_fill_values(order, current_price, float(state.filled_qty or 0))
+    else:
+        state.exit_price = current_price
+        state.exit_order = {"simulated": True, "side": "SELL" if state.payload.direction == "LONG" else "BUY"}
+    update_strategy_status(state, "cancelled" if cancelled else "completed", "仓位已平仓，策略结束", exit_price=state.exit_price)
+
+
+def run_futures_strategy(strategy_id: str) -> None:
+    with FUTURES_STRATEGIES_LOCK:
+        state = FUTURES_STRATEGIES.get(strategy_id)
+    if state is None:
+        return
+    try:
+        if state.status in {"entering", "exiting"}:
+            update_strategy_status(state, "attention_required", "服务重启时订单状态不确定，需要人工核对")
+            return
+        if state.restored and state.payload.mode == "live" and state.status == "position_open":
+            reconcile_restored_live_position(state)
+            add_strategy_event(state, "position_verified", "服务重启后已核对 Binance 实际持仓")
+        for current_price, price_ts, feed_state in strategy_price_stream(state):
+            state.current_price = current_price
+            state.current_price_ts = price_ts
+            state.feed_state = feed_state
+            state.entry_line_price = state.payload.entry_line.price_at(price_ts)
+            state.stop_line_price = state.payload.stop_line.price_at(price_ts)
+            state.updated_ts = int(time.time() * 1000)
+            if time.monotonic() - state.last_persist_monotonic >= 1:
+                persist_strategy(state)
+                state.last_persist_monotonic = time.monotonic()
+            if state.error and state.error.startswith("行情暂时不可用"):
+                state.error = None
+
+            if state.cancel_event.is_set():
+                break
+            if state.status == "armed":
+                validate_stop_side(state.payload, current_price, price_ts)
+                if not should_enter(state.payload, current_price, state.entry_line_price):
+                    continue
+                update_strategy_status(state, "entering", "入场线已触发，正在提交市价单", trigger_price=current_price)
+                if state.payload.mode == "live":
+                    live_strategy_preflight(state.payload, configure=True)
+                    order = submit_futures_market_order(state, closing=False, reference_price=current_price)
+                    fallback_qty = normalize_futures_quantity(state.payload.symbol, state.payload.notional_usdt, current_price)
+                    state.filled_qty, state.entry_price = order_fill_values(order, current_price, fallback_qty)
+                    state.entry_order = order
+                else:
+                    state.filled_qty = state.payload.notional_usdt / current_price
+                    state.entry_price = current_price
+                    state.entry_order = {"simulated": True, "side": "BUY" if state.payload.direction == "LONG" else "SELL"}
+                update_strategy_status(state, "position_open", "入场成交，开始监控止损", entry_price=state.entry_price, quantity=state.filled_qty)
+
+            if state.status == "position_open" and should_stop(state.payload, current_price, state.stop_line_price):
+                add_strategy_event(state, "stop_triggered", "止损线已触发", trigger_price=current_price, line_price=state.stop_line_price)
+                close_strategy_position(state, current_price)
+                return
+
+        if state.status == "position_open":
+            if state.close_on_cancel:
+                price = state.current_price or fetch_futures_price(state.payload.symbol)
+                close_strategy_position(state, price, cancelled=True)
+            else:
+                update_strategy_status(state, "position_left_open", "监控已停止，仓位保持开启")
+        elif state.status in {"armed", "entering"}:
+            update_strategy_status(state, "cancelled", "策略已取消")
+    except ValueError as exc:
+        state.error = str(exc)
+        update_strategy_status(state, "failed", f"策略校验失败：{exc}")
+    except Exception as exc:
+        logger.exception("Futures strategy failed: strategy_id=%s", strategy_id)
+        state.error = str(exc)
+        update_strategy_status(state, "attention_required" if state.status in {"entering", "position_open", "exiting"} else "failed", f"策略运行失败：{exc}")
+
+
+def start_strategy_thread(state: FuturesStrategyState) -> None:
+    thread = threading.Thread(target=run_futures_strategy, args=(state.strategy_id,), daemon=True)
+    thread.start()
+
+
+def restore_persisted_strategies() -> None:
+    init_strategy_db()
+    with FUTURES_DB_LOCK, sqlite3.connect(get_strategy_db_path()) as conn:
+        rows = conn.execute(
+            "SELECT strategy_id, payload_json, state_json, status FROM futures_strategies ORDER BY updated_ts DESC LIMIT 50"
+        ).fetchall()
+    for strategy_id, payload_json, state_json, status in rows:
+        try:
+            payload = FuturesStrategyRequest.model_validate_json(payload_json)
+            saved = json.loads(state_json)
+            state = FuturesStrategyState(
+                strategy_id=strategy_id,
+                payload=payload,
+                status=status,
+                created_ts=int(saved.get("created_ts") or time.time() * 1000),
+                updated_ts=int(saved.get("updated_ts") or time.time() * 1000),
+                current_price=to_finite_number(saved.get("current_price")),
+                current_price_ts=to_int(saved.get("current_price_ts")),
+                entry_line_price=to_finite_number(saved.get("entry_line_price")),
+                stop_line_price=to_finite_number(saved.get("stop_line_price")),
+                feed_state=str(saved.get("feed_state") or "connecting"),
+                filled_qty=to_finite_number(saved.get("filled_qty")),
+                entry_price=to_finite_number(saved.get("entry_price")),
+                exit_price=to_finite_number(saved.get("exit_price")),
+                entry_order=saved.get("entry_order"),
+                exit_order=saved.get("exit_order"),
+                error=str(saved.get("error")) if saved.get("error") else None,
+                events=list(saved.get("events") or []),
+                restored=True,
+            )
+            with FUTURES_STRATEGIES_LOCK:
+                FUTURES_STRATEGIES[strategy_id] = state
+            if status in ACTIVE_FUTURES_STRATEGY_STATUSES:
+                start_strategy_thread(state)
+        except Exception:
+            logger.exception("Failed to restore futures strategy: %s", strategy_id)
+
+
+@app.on_event("startup")
+def start_futures_strategy_runtime() -> None:
+    restore_persisted_strategies()
+
+
+@app.post("/ai/line-recognize")
+def ai_line_recognize(payload: LineRecognitionRequest):
+    try:
+        return recognize_chart_line(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status_code = 500 if "OPENROUTER_API_KEY 未配置" in str(exc) else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@app.get("/market/klines")
+def market_klines(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 500):
+    if timeframe not in INTERVAL_TO_MS:
+        raise HTTPException(status_code=400, detail="unsupported timeframe")
+    try:
+        return fetch_futures_klines(symbol.strip().upper(), timeframe, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/strategy/watch")
+def create_futures_strategy(payload: FuturesStrategyRequest):
+    with FUTURES_STRATEGIES_LOCK:
+        if any(
+            item.payload.symbol == payload.symbol
+            and item.payload.mode == "live"
+            and item.status in ACTIVE_FUTURES_STRATEGY_STATUSES
+            for item in FUTURES_STRATEGIES.values()
+        ) and payload.mode == "live":
+            raise HTTPException(status_code=409, detail=f"{payload.symbol} 已有活动 live 策略")
+    try:
+        current_price = fetch_futures_price(payload.symbol)
+        now = int(time.time() * 1000)
+        entry_line_price, stop_line_price = validate_stop_side(payload, current_price, now)
+        if payload.mode == "live":
+            live_strategy_preflight(payload, configure=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    strategy_id = uuid.uuid4().hex
+    state = FuturesStrategyState(
+        strategy_id=strategy_id,
+        payload=payload,
+        status="armed",
+        created_ts=now,
+        updated_ts=now,
+        current_price=current_price,
+        current_price_ts=now,
+        entry_line_price=entry_line_price,
+        stop_line_price=stop_line_price,
+    )
+    state.events.append({"ts": now, "type": "status", "message": "策略已启用，正在等待入场", "details": {"status": "armed"}})
+    with FUTURES_STRATEGIES_LOCK:
+        FUTURES_STRATEGIES[strategy_id] = state
+    persist_strategy(state)
+    start_strategy_thread(state)
+    return strategy_public_dict(state)
+
+
+@app.get("/strategy/watch")
+def list_futures_strategies():
+    with FUTURES_STRATEGIES_LOCK:
+        states = sorted(FUTURES_STRATEGIES.values(), key=lambda item: item.created_ts, reverse=True)
+        return [strategy_public_dict(item) for item in states[:50]]
+
+
+@app.get("/strategy/watch/{strategy_id}")
+def get_futures_strategy(strategy_id: str):
+    with FUTURES_STRATEGIES_LOCK:
+        state = FUTURES_STRATEGIES.get(strategy_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="strategy not found")
+        return strategy_public_dict(state)
+
+
+@app.delete("/strategy/watch/{strategy_id}")
+def cancel_futures_strategy(strategy_id: str, close_position: Optional[bool] = None):
+    with FUTURES_STRATEGIES_LOCK:
+        state = FUTURES_STRATEGIES.get(strategy_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="strategy not found")
+        if state.status not in ACTIVE_FUTURES_STRATEGY_STATUSES:
+            return strategy_public_dict(state)
+        if state.status in {"position_open", "exiting"} and close_position is None:
+            raise HTTPException(status_code=409, detail="position is open; choose close_position=true or false")
+        state.close_on_cancel = bool(close_position)
+        state.cancel_event.set()
+        add_strategy_event(state, "cancel_requested", "用户请求取消策略", close_position=state.close_on_cancel)
+        return strategy_public_dict(state)

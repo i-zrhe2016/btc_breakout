@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BTC Breakout · 双线策略</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #020617;
+      --surface: #0b1120;
+      --surface-2: #111827;
+      --surface-3: #182235;
+      --border: #334155;
+      --border-soft: #1e293b;
+      --text: #f8fafc;
+      --muted: #a8b4c7;
+      --faint: #7c8ca3;
+      --cyan: #22d3ee;
+      --cyan-soft: rgba(34, 211, 238, .12);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, .12);
+      --red: #f87171;
+      --red-soft: rgba(248, 113, 113, .12);
+      --amber: #fbbf24;
+      --amber-soft: rgba(251, 191, 36, .12);
+      --radius: 14px;
+      --shadow: 0 16px 50px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background:
+        radial-gradient(circle at 15% -10%, rgba(34, 211, 238, .08), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, "Noto Sans SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    button, input, select { font: inherit; }
+    button, [role="button"] { touch-action: manipulation; }
+    .skip-link { position: fixed; left: 12px; top: 8px; z-index: 100; transform: translateY(-160%); background: var(--cyan); color: #001014; padding: 9px 13px; border-radius: 8px; font-weight: 700; }
+    .skip-link:focus { transform: translateY(0); }
+    button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible, a:focus-visible {
+      outline: 3px solid rgba(34, 211, 238, .6);
+      outline-offset: 2px;
+    }
+
+    .topbar {
+      min-height: 64px;
+      border-bottom: 1px solid var(--border-soft);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 10px 24px;
+      background: rgba(2, 6, 23, .88);
+      backdrop-filter: blur(14px);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brand-mark {
+      width: 34px; height: 34px; border-radius: 10px;
+      display: grid; place-items: center;
+      color: #001014; background: var(--cyan); font-weight: 900;
+      box-shadow: 0 0 22px rgba(34, 211, 238, .24);
+    }
+    .brand strong { display: block; font-size: 15px; letter-spacing: .01em; }
+    .brand small { display: block; color: var(--muted); font-size: 12px; }
+    nav { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    nav a {
+      color: var(--muted); text-decoration: none; border: 1px solid var(--border-soft);
+      border-radius: 999px; padding: 8px 13px; min-height: 44px; display: inline-flex; align-items: center;
+    }
+    nav a.active { color: var(--text); border-color: var(--cyan); background: var(--cyan-soft); }
+
+    main { max-width: 1600px; margin: 0 auto; padding: 22px 24px 48px; }
+    .hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    .eyebrow { color: var(--cyan); font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 4px 0 4px; font-size: clamp(24px, 3vw, 38px); line-height: 1.2; }
+    .hero p { margin: 0; color: var(--muted); max-width: 720px; }
+    .live-pill { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 8px 12px; white-space: nowrap; color: var(--muted); }
+    .live-pill::before { content: ""; width: 8px; height: 8px; display: inline-block; border-radius: 50%; background: var(--amber); margin-right: 8px; }
+    .live-pill.live::before { background: var(--green); box-shadow: 0 0 10px var(--green); }
+    .live-pill.stale::before { background: var(--red); }
+
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 18px 0; }
+    .step { padding: 10px 12px; border: 1px solid var(--border-soft); background: var(--surface); border-radius: 10px; color: var(--faint); }
+    .step b { color: inherit; margin-right: 6px; }
+    .step.active { color: var(--text); border-color: var(--cyan); background: var(--cyan-soft); }
+    .step.done { color: #bbf7d0; border-color: rgba(34, 197, 94, .45); }
+
+    .workspace { display: grid; grid-template-columns: minmax(310px, .82fr) minmax(420px, 1.4fr) minmax(300px, .78fr); gap: 16px; align-items: start; }
+    .stack { display: grid; gap: 16px; }
+    .panel { background: linear-gradient(180deg, rgba(17, 24, 39, .97), rgba(11, 17, 32, .97)); border: 1px solid var(--border-soft); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+    .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 16px 12px; border-bottom: 1px solid var(--border-soft); }
+    .panel-head h2, .panel-head h3 { margin: 0; font-size: 16px; }
+    .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .panel-body { padding: 16px; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid var(--border); padding: 3px 8px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .badge.ok { color: #bbf7d0; border-color: rgba(34, 197, 94, .5); background: var(--green-soft); }
+    .badge.warn { color: #fde68a; border-color: rgba(251, 191, 36, .5); background: var(--amber-soft); }
+    .badge.error { color: #fecaca; border-color: rgba(248, 113, 113, .5); background: var(--red-soft); }
+
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+    label { display: block; color: var(--muted); font-size: 12px; margin: 0 0 5px; }
+    input, select {
+      width: 100%; min-height: 44px; border: 1px solid var(--border); border-radius: 9px;
+      background: #050b18; color: var(--text); padding: 9px 10px;
+    }
+    input:disabled { opacity: .65; }
+    .segmented { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: 10px; padding: 3px; background: #050b18; }
+    .segmented button { border: 0; border-radius: 7px; min-height: 44px; background: transparent; color: var(--muted); cursor: pointer; }
+    .segmented button.active { background: var(--surface-3); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+    .segmented button.long.active { color: #bbf7d0; background: var(--green-soft); }
+    .segmented button.short.active { color: #fecaca; background: var(--red-soft); }
+    .helper { color: var(--faint); font-size: 12px; margin-top: 8px; }
+
+    .paste-zone {
+      position: relative; min-height: 180px; border: 1px dashed #475569; border-radius: 12px;
+      background: rgba(2, 6, 23, .72); display: grid; place-items: center; text-align: center;
+      padding: 16px; cursor: pointer; overflow: hidden; transition: border-color .16s ease, background .16s ease;
+    }
+    .paste-zone:hover, .paste-zone.active { border-color: var(--cyan); background: var(--cyan-soft); }
+    .paste-zone.dragging { border-style: solid; box-shadow: inset 0 0 0 2px var(--cyan); }
+    .paste-zone img { width: 100%; height: 100%; max-height: 300px; object-fit: contain; display: block; }
+    .paste-zone svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .paste-icon { width: 40px; height: 40px; margin: 0 auto 8px; color: var(--cyan); }
+    .paste-zone strong { display: block; }
+    .paste-zone small { color: var(--muted); display: block; margin-top: 5px; }
+    .hidden { display: none !important; }
+    .line-editor { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+    .line-editor-title { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .inline-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+    button.primary, button.secondary, button.danger, button.ghost {
+      min-height: 44px; border-radius: 9px; padding: 9px 13px; cursor: pointer; border: 1px solid transparent; font-weight: 650;
+    }
+    button.primary { background: var(--cyan); color: #001014; }
+    button.primary:hover { background: #67e8f9; }
+    button.secondary { background: var(--surface-3); color: var(--text); border-color: var(--border); }
+    button.danger { background: var(--red-soft); color: #fecaca; border-color: rgba(248, 113, 113, .45); }
+    button.ghost { background: transparent; color: var(--muted); border-color: var(--border-soft); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .wide { width: 100%; }
+
+    .chart-wrap { position: relative; min-height: 540px; background: #02050c; }
+    #chart { width: 100%; height: 540px; display: block; }
+    .chart-legend { position: absolute; top: 12px; left: 12px; display: flex; gap: 10px; flex-wrap: wrap; pointer-events: none; }
+    .legend-item { background: rgba(2, 6, 23, .85); border: 1px solid var(--border-soft); border-radius: 8px; padding: 5px 8px; font-size: 11px; color: var(--muted); }
+    .legend-line { display: inline-block; width: 18px; border-top: 2px solid var(--cyan); margin-right: 6px; vertical-align: middle; }
+    .legend-line.stop { border-color: var(--red); border-top-style: dashed; }
+    .chart-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 30px; pointer-events: none; }
+    .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px; border-top: 1px solid var(--border-soft); }
+    .metric { background: rgba(2, 6, 23, .7); border: 1px solid var(--border-soft); border-radius: 9px; padding: 9px; min-width: 0; }
+    .metric span { color: var(--faint); font-size: 11px; display: block; }
+    .metric strong { font: 650 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+
+    .status-box { border: 1px solid var(--border-soft); border-radius: 10px; background: rgba(2, 6, 23, .7); padding: 12px; color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+    .status-box:empty { display: none; }
+    .status-box.error { border-color: rgba(248, 113, 113, .5); color: #fecaca; background: var(--red-soft); }
+    .status-box.ok { border-color: rgba(34, 197, 94, .5); color: #bbf7d0; background: var(--green-soft); }
+    .status-box.info { border-color: rgba(34, 211, 238, .4); color: #cffafe; background: var(--cyan-soft); }
+    .review-list { display: grid; gap: 8px; margin: 0 0 14px; }
+    .review-row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-soft); padding-bottom: 7px; }
+    .review-row span { color: var(--muted); }
+    .review-row b { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .risk-note { border-left: 3px solid var(--amber); background: var(--amber-soft); color: #fde68a; padding: 10px 12px; font-size: 12px; margin: 12px 0; }
+
+    .timeline { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+    .timeline li { display: grid; grid-template-columns: 10px 1fr; gap: 10px; color: var(--muted); font-size: 12px; }
+    .timeline li::before { content: ""; width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--border); }
+    .timeline li.current::before { background: var(--cyan); box-shadow: 0 0 12px rgba(34, 211, 238, .7); }
+    .timeline li.done::before { background: var(--green); }
+    .events { max-height: 220px; overflow: auto; display: grid; gap: 8px; }
+    .event { border-left: 2px solid var(--border); padding-left: 9px; color: var(--muted); font-size: 12px; }
+    .event time { display: block; color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    dialog { width: min(520px, calc(100% - 28px)); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 24px 80px #000; padding: 0; }
+    dialog::backdrop { background: rgba(0, 0, 0, .76); backdrop-filter: blur(3px); }
+    .dialog-body { padding: 18px; }
+    .dialog-body h2 { margin: 0 0 6px; }
+    .dialog-body p { color: var(--muted); }
+    .confirm-check { display: flex; align-items: flex-start; gap: 9px; border: 1px solid var(--border); border-radius: 9px; padding: 10px; margin: 12px 0; }
+    .confirm-check input { width: 18px; min-height: 18px; margin-top: 2px; }
+    .dialog-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+
+    @media (max-width: 1180px) {
+      .workspace { grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.3fr); }
+      .right-column { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 780px) {
+      .topbar { position: static; padding: 12px 16px; align-items: flex-start; }
+      .brand small { display: none; }
+      nav a { padding: 7px 10px; }
+      main { padding: 18px 14px 36px; }
+      .hero { align-items: flex-start; flex-direction: column; }
+      .steps { grid-template-columns: 1fr 1fr; }
+      .workspace { grid-template-columns: 1fr; }
+      .right-column { grid-column: auto; grid-template-columns: 1fr; }
+      .chart-wrap, #chart { min-height: 430px; height: 430px; }
+      .metric-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 430px) {
+      .topbar { display: block; }
+      nav { margin-top: 10px; justify-content: flex-start; }
+      .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .steps { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: 1fr; }
+      .dialog-actions button { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">B</div>
+      <div><strong>BTC Breakout</strong><small>USDⓈ-M Futures Strategy Workbench</small></div>
+    </div>
+    <nav aria-label="主导航">
+      <a class="active" href="/">双线策略</a>
+      <a href="/manual">手动画线</a>
+      <a href="/ai">单图识别</a>
+    </nav>
+  </header>
+
+  <main id="mainContent" tabindex="-1">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Two-image strategy builder</div>
+        <h1>粘贴两张截图，建立入场与止损</h1>
+        <p>分别识别水平线或趋势线，人工确认位置后启用 LONG / SHORT 策略。默认仅模拟，不会发送真实订单。</p>
+      </div>
+      <div id="feedPill" class="live-pill">尚未启用策略</div>
+    </section>
+
+    <div class="steps" aria-label="策略创建步骤">
+      <div class="step active" id="step1"><b>01</b>交易设置</div>
+      <div class="step" id="step2"><b>02</b>识别入场线</div>
+      <div class="step" id="step3"><b>03</b>识别止损线</div>
+      <div class="step" id="step4"><b>04</b>确认并启用</div>
+    </div>
+
+    <div class="workspace">
+      <div class="stack">
+        <section class="panel" aria-labelledby="settingsTitle">
+          <div class="panel-head"><div><h2 id="settingsTitle">交易设置</h2><p>Binance USDⓈ-M · 单向持仓 · 全仓</p></div><span class="badge">CONTRACT PRICE</span></div>
+          <div class="panel-body">
+            <div class="form-grid">
+              <div class="field"><label for="symbol">交易对</label><input id="symbol" value="BTCUSDT" autocomplete="off" /></div>
+              <div class="field"><label for="timeframe">截图周期</label><select id="timeframe"><option>15m</option><option selected>1h</option><option>4h</option><option>1d</option></select></div>
+              <div class="field full"><label>方向</label><div class="segmented" role="group" aria-label="交易方向"><button id="longBtn" class="long active" type="button" aria-pressed="true">LONG 做多</button><button id="shortBtn" class="short" type="button" aria-pressed="false">SHORT 做空</button></div></div>
+              <div class="field"><label for="notional">名义仓位（USDT）</label><input id="notional" type="number" value="100" min="5" step="1" /></div>
+              <div class="field"><label for="leverage">杠杆</label><input id="leverage" type="number" value="1" min="1" max="125" step="1" /></div>
+              <div class="field full"><label>运行模式</label><div class="segmented" role="group" aria-label="运行模式"><button id="simulateBtn" class="active" type="button" aria-pressed="true">SIMULATE 模拟</button><button id="liveBtn" type="button" aria-pressed="false">LIVE 实盘</button></div></div>
+              <div class="field full"><label for="timezone">图表时区</label><input id="timezone" value="UTC" /></div>
+            </div>
+            <p class="helper">固定名义价值决定订单数量；杠杆只改变所需保证金。live 会把交易对设置为全仓与所选杠杆。</p>
+          </div>
+        </section>
+
+        <section class="panel line-card" data-role="entry" aria-labelledby="entryTitle">
+          <div class="panel-head"><div><h3 id="entryTitle">入场线截图</h3><p>粘贴只包含一条明确目标线的图表</p></div><span id="entryBadge" class="badge">等待截图</span></div>
+          <div class="panel-body">
+            <div id="entryPaste" class="paste-zone active" tabindex="0" role="button" aria-label="粘贴或选择入场线截图">
+              <div class="paste-placeholder">
+                <svg class="paste-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 5h8M9 3h6a1 1 0 0 1 1 1v2H8V4a1 1 0 0 1 1-1Z"/><path d="M7 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h9l7-7V7a2 2 0 0 0-2-2h-2"/><path d="M14 21v-5a2 2 0 0 1 2-2h5"/></svg>
+                <strong>点击此处后直接粘贴</strong><small>Ctrl / Cmd + V，也可拖放或点击选择图片</small>
+              </div>
+              <img class="hidden" alt="入场线截图预览" />
+              <svg class="geometry hidden" aria-hidden="true"><line stroke="#22d3ee" stroke-width="4" stroke-linecap="round"/><circle r="6" fill="#22d3ee"/><circle r="6" fill="#22d3ee"/></svg>
+            </div>
+            <input id="entryFile" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+            <div class="inline-actions"><select id="entryExpected" aria-label="入场线预期类型"><option value="auto">自动判断线型</option><option value="horizontal">水平线</option><option value="trendline">趋势线</option></select><button id="entryRecognize" class="secondary" type="button" disabled>识别</button><button id="entryClear" class="ghost" type="button" disabled>清除</button></div>
+            <div id="entryStatus" class="status-box" role="status" aria-live="polite"></div>
+            <div id="entryEditor" class="line-editor hidden"></div>
+          </div>
+        </section>
+
+        <section class="panel line-card" data-role="stop" aria-labelledby="stopTitle">
+          <div class="panel-head"><div><h3 id="stopTitle">止损线截图</h3><p>支持水平止损或随时间变化的趋势线止损</p></div><span id="stopBadge" class="badge">等待截图</span></div>
+          <div class="panel-body">
+            <div id="stopPaste" class="paste-zone" tabindex="0" role="button" aria-label="粘贴或选择止损线截图">
+              <div class="paste-placeholder">
+                <svg class="paste-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 5h8M9 3h6a1 1 0 0 1 1 1v2H8V4a1 1 0 0 1 1-1Z"/><path d="M7 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h9l7-7V7a2 2 0 0 0-2-2h-2"/><path d="M14 21v-5a2 2 0 0 1 2-2h5"/></svg>
+                <strong>粘贴止损线截图</strong><small>识别后可人工修正线型、价格和锚点</small>
+              </div>
+              <img class="hidden" alt="止损线截图预览" />
+              <svg class="geometry hidden" aria-hidden="true"><line stroke="#f87171" stroke-width="4" stroke-dasharray="9 7" stroke-linecap="round"/><circle r="6" fill="#f87171"/><circle r="6" fill="#f87171"/></svg>
+            </div>
+            <input id="stopFile" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+            <div class="inline-actions"><select id="stopExpected" aria-label="止损线预期类型"><option value="auto">自动判断线型</option><option value="horizontal">水平线</option><option value="trendline">趋势线</option></select><button id="stopRecognize" class="secondary" type="button" disabled>识别</button><button id="stopClear" class="ghost" type="button" disabled>清除</button></div>
+            <div id="stopStatus" class="status-box" role="status" aria-live="polite"></div>
+            <div id="stopEditor" class="line-editor hidden"></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel chart-panel" aria-labelledby="chartTitle">
+        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>识别结果会回画到当前 Futures K 线</p></div><button id="reloadChart" class="ghost" type="button">刷新 K 线</button></div>
+        <div class="chart-wrap">
+          <canvas id="chart" role="img" aria-label="BTC 合约 K 线、入场线与止损线预览；下方提供当前价格和两条线的文字数值"></canvas>
+          <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
+          <div id="chartEmpty" class="chart-empty">正在加载 Futures K 线…</div>
+        </div>
+        <div class="metric-grid">
+          <div class="metric"><span>当前合约价格</span><strong id="currentMetric">--</strong></div>
+          <div class="metric"><span>入场线当前值</span><strong id="entryMetric">--</strong></div>
+          <div class="metric"><span>止损线当前值</span><strong id="stopMetric">--</strong></div>
+        </div>
+      </section>
+
+      <div class="stack right-column">
+        <section class="panel" aria-labelledby="reviewTitle">
+          <div class="panel-head"><div><h2 id="reviewTitle">确认设置</h2><p>所有字段确认后才能启用策略</p></div><span id="readyBadge" class="badge">未就绪</span></div>
+          <div class="panel-body">
+            <div id="reviewList" class="review-list"></div>
+            <div id="riskNote" class="risk-note">止损由当前服务实时监控；服务与行情同时失联时无法触发平仓。</div>
+            <div id="formStatus" class="status-box" role="alert"></div>
+            <button id="armStrategy" class="primary wide" type="button" disabled>确认并启用模拟策略</button>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="monitorTitle">
+          <div class="panel-head"><div><h2 id="monitorTitle">策略监控</h2><p id="strategyIdLabel">尚未启用</p></div><span id="strategyBadge" class="badge">IDLE</span></div>
+          <div class="panel-body">
+            <ol id="timeline" class="timeline">
+              <li>等待入场线触发</li><li>提交市价入场单</li><li>持仓中监控止损</li><li>触发止损并平仓</li>
+            </ol>
+            <div id="monitorStatus" class="status-box" role="status" aria-live="polite"></div>
+            <div id="events" class="events"></div>
+            <button id="cancelStrategy" class="danger wide hidden" type="button">取消当前策略</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle">
+    <div class="dialog-body">
+      <h2 id="confirmTitle">确认启用策略</h2>
+      <p id="confirmSummary"></p>
+      <div id="liveConfirmWrap" class="confirm-check hidden"><input id="liveConfirm" type="checkbox" /><label for="liveConfirm">我确认这是 Binance USDⓈ-M 实盘策略，入场会发送市价单，止损依赖当前服务持续在线。</label></div>
+      <div class="dialog-actions"><button id="confirmBack" class="ghost" type="button">返回检查</button><button id="confirmArm" class="primary" type="button">启用策略</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="cancelDialog" aria-labelledby="cancelTitle">
+    <div class="dialog-body">
+      <h2 id="cancelTitle">取消当前策略</h2>
+      <p id="cancelMessage">请选择如何处理当前仓位。</p>
+      <div class="dialog-actions"><button id="cancelBack" class="ghost" type="button">返回</button><button id="leavePosition" class="secondary" type="button">保留仓位，仅停监控</button><button id="closePosition" class="danger" type="button">市价平仓并取消</button></div>
+    </div>
+  </dialog>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const app = {
+      direction: "LONG",
+      mode: "simulate",
+      activeRole: "entry",
+      images: { entry: null, stop: null },
+      lines: { entry: null, stop: null },
+      geometries: { entry: null, stop: null },
+      candles: [],
+      currentStrategy: null,
+      pollTimer: null
+    };
+    const roleLabel = { entry: "入场线", stop: "止损线" };
+    const terminalStatuses = new Set(["completed", "cancelled", "position_left_open", "failed", "attention_required"]);
+
+    function apiBase() { return String(window.location.origin || "http://127.0.0.1:8000").replace(/\/$/, ""); }
+    function formatPrice(value) { return Number.isFinite(Number(value)) ? Number(value).toLocaleString("en-US", { maximumFractionDigits: 4 }) : "--"; }
+    function setBox(id, message, kind = "") { const el = $(id); el.textContent = message || ""; el.className = `status-box ${kind}`.trim(); }
+    function setBadge(id, text, kind = "") { const el = $(id); el.textContent = text; el.className = `badge ${kind}`.trim(); }
+    function setActiveRole(role) {
+      app.activeRole = role;
+      ["entry", "stop"].forEach((item) => $(`${item}Paste`).classList.toggle("active", item === role));
+    }
+
+    function setDirection(direction) {
+      app.direction = direction;
+      $("longBtn").classList.toggle("active", direction === "LONG");
+      $("shortBtn").classList.toggle("active", direction === "SHORT");
+      $("longBtn").setAttribute("aria-pressed", String(direction === "LONG"));
+      $("shortBtn").setAttribute("aria-pressed", String(direction === "SHORT"));
+      updateReview(); drawChart();
+    }
+    function setMode(mode) {
+      app.mode = mode;
+      $("simulateBtn").classList.toggle("active", mode === "simulate");
+      $("liveBtn").classList.toggle("active", mode === "live");
+      $("simulateBtn").setAttribute("aria-pressed", String(mode === "simulate"));
+      $("liveBtn").setAttribute("aria-pressed", String(mode === "live"));
+      $("armStrategy").textContent = mode === "live" ? "确认并启用实盘策略" : "确认并启用模拟策略";
+      $("riskNote").classList.toggle("hidden", mode !== "live");
+      updateReview();
+    }
+
+    function validateImage(file) {
+      if (!file || !["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error("仅支持 PNG、JPEG 或 WebP 图片");
+      if (file.size > 10 * 1024 * 1024) throw new Error("截图不能超过 10MB");
+    }
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error("图片读取失败")); reader.readAsDataURL(file); });
+    }
+    async function acceptImage(role, file) {
+      try {
+        validateImage(file);
+        const dataUrl = await fileToDataUrl(file);
+        app.images[role] = dataUrl; app.lines[role] = null; app.geometries[role] = null;
+        const zone = $(`${role}Paste`); zone.querySelector(".paste-placeholder").classList.add("hidden");
+        const img = zone.querySelector("img"); img.src = dataUrl; img.classList.remove("hidden");
+        zone.querySelector(".geometry").classList.add("hidden");
+        $(`${role}Recognize`).disabled = false; $(`${role}Clear`).disabled = false;
+        $(`${role}Editor`).classList.add("hidden");
+        setBadge(`${role}Badge`, "等待识别", "warn"); setBox(`${role}Status`, "截图已就绪，点击“识别”调用 Codex。", "info");
+        setActiveRole(role === "entry" ? "stop" : role); updateSteps(); updateReview();
+      } catch (error) { setBox(`${role}Status`, error.message || String(error), "error"); }
+    }
+    function clearRole(role) {
+      app.images[role] = null; app.lines[role] = null; app.geometries[role] = null;
+      const zone = $(`${role}Paste`); zone.querySelector(".paste-placeholder").classList.remove("hidden");
+      const img = zone.querySelector("img"); img.removeAttribute("src"); img.classList.add("hidden"); zone.querySelector(".geometry").classList.add("hidden");
+      $(`${role}Recognize`).disabled = true; $(`${role}Clear`).disabled = true; $(`${role}Editor`).classList.add("hidden");
+      setBadge(`${role}Badge`, "等待截图"); setBox(`${role}Status`, ""); setActiveRole(role); updateSteps(); updateReview(); drawChart();
+    }
+    function drawGeometry(role, geometry) {
+      if (!geometry) return;
+      const svg = $(`${role}Paste`).querySelector(".geometry");
+      const line = svg.querySelector("line"), circles = svg.querySelectorAll("circle");
+      const values = [geometry.x1, geometry.y1, geometry.x2, geometry.y2].map(Number);
+      if (!values.every(Number.isFinite)) return;
+      line.setAttribute("x1", `${values[0] * 100}%`); line.setAttribute("y1", `${values[1] * 100}%`); line.setAttribute("x2", `${values[2] * 100}%`); line.setAttribute("y2", `${values[3] * 100}%`);
+      circles[0].setAttribute("cx", `${values[0] * 100}%`); circles[0].setAttribute("cy", `${values[1] * 100}%`); circles[1].setAttribute("cx", `${values[2] * 100}%`); circles[1].setAttribute("cy", `${values[3] * 100}%`);
+      svg.classList.remove("hidden");
+    }
+
+    async function recognize(role) {
+      if (!app.images[role]) return;
+      const button = $(`${role}Recognize`); button.disabled = true; button.textContent = "识别中…";
+      setBadge(`${role}Badge`, "AI 识别中", "warn"); setBox(`${role}Status`, "正在定位截图中的人工画线，通常需要几十秒…", "info");
+      try {
+        const body = {
+          image_data_url: app.images[role], role,
+          expected_line_type: $(`${role}Expected`).value,
+          symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value,
+          chart_timezone: $("timezone").value.trim() || "UTC", usd_amount: Number($("notional").value), mode: app.mode,
+          target_line_hint: role === "entry" ? "用于入场触发的最明显人工画线" : "用于止损的最明显人工画线"
+        };
+        const response = await fetch(`${apiBase()}/ai/line-recognize`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
+        if (!result?.line) throw new Error(result?.notes || "未识别到可用线段，请换更清晰截图或指定线型");
+        app.lines[role] = result.line; app.geometries[role] = result.image_geometry || null;
+        drawGeometry(role, app.geometries[role]); renderLineEditor(role);
+        const low = Number(result.confidence) < .75;
+        setBadge(`${role}Badge`, `${result.line.kind === "horizontal" ? "水平线" : "趋势线"} · ${Math.round(Number(result.confidence) * 100)}%`, low ? "warn" : "ok");
+        setBox(`${role}Status`, `${low ? "置信度偏低，请人工复核。\n" : ""}${result.notes || "识别完成，可修改具体参数。"}`, low ? "" : "ok");
+        if (role === "entry" && !app.lines.stop) setActiveRole("stop"); updateSteps(); updateReview(); drawChart();
+      } catch (error) { setBadge(`${role}Badge`, "识别失败", "error"); setBox(`${role}Status`, `识别失败：${error.message || error}`, "error"); }
+      finally { button.disabled = false; button.textContent = "重新识别"; }
+    }
+
+    function renderLineEditor(role) {
+      const line = app.lines[role], root = $(`${role}Editor`); if (!line) return;
+      const isHorizontal = line.kind === "horizontal";
+      root.innerHTML = `<div class="line-editor-title"><strong>${roleLabel[role]}具体位置</strong><span class="badge ${isHorizontal ? "" : "ok"}">${isHorizontal ? "HORIZONTAL" : "TRENDLINE"}</span></div>
+        <div class="form-grid">
+          <div class="field full"><label for="${role}Kind">线型</label><select id="${role}Kind"><option value="horizontal" ${isHorizontal ? "selected" : ""}>水平线</option><option value="trendline" ${!isHorizontal ? "selected" : ""}>趋势线</option></select></div>
+          ${isHorizontal ? `<div class="field full"><label for="${role}Price">价格</label><input id="${role}Price" type="number" step="0.01" value="${Number(line.price)}" /></div>` : `
+          <div class="field"><label for="${role}Ts1">锚点 1 时间（Unix ms）</label><input id="${role}Ts1" type="number" value="${Number(line.ts1)}" /></div>
+          <div class="field"><label for="${role}P1">锚点 1 价格</label><input id="${role}P1" type="number" step="0.01" value="${Number(line.price1)}" /></div>
+          <div class="field"><label for="${role}Ts2">锚点 2 时间（Unix ms）</label><input id="${role}Ts2" type="number" value="${Number(line.ts2)}" /></div>
+          <div class="field"><label for="${role}P2">锚点 2 价格</label><input id="${role}P2" type="number" step="0.01" value="${Number(line.price2)}" /></div>`}
+        </div>`;
+      root.classList.remove("hidden");
+      $(`${role}Kind`).addEventListener("change", (event) => {
+        const currentPrice = linePriceAt(line, Date.now()) || Number(app.candles.at(-1)?.close) || 1;
+        app.lines[role] = event.target.value === "horizontal" ? { kind: "horizontal", price: currentPrice } : { kind: "trendline", ts1: Date.now() - 86400000, price1: currentPrice, ts2: Date.now(), price2: currentPrice };
+        renderLineEditor(role); updateReview(); drawChart();
+      });
+      root.querySelectorAll("input").forEach((input) => input.addEventListener("input", () => {
+        if (app.lines[role].kind === "horizontal") app.lines[role].price = Number($(`${role}Price`).value);
+        else Object.assign(app.lines[role], { ts1: Number($(`${role}Ts1`).value), price1: Number($(`${role}P1`).value), ts2: Number($(`${role}Ts2`).value), price2: Number($(`${role}P2`).value) });
+        updateReview(); drawChart();
+      }));
+    }
+
+    function linePriceAt(line, ts) {
+      if (!line) return null;
+      if (line.kind === "horizontal") return Number(line.price);
+      const span = Number(line.ts2) - Number(line.ts1); if (!span) return null;
+      return Number(line.price1) + (Number(line.price2) - Number(line.price1)) * ((ts - Number(line.ts1)) / span);
+    }
+    async function loadChart() {
+      $("chartEmpty").classList.remove("hidden"); $("chartEmpty").textContent = "正在加载 Futures K 线…";
+      try {
+        const symbol = $("symbol").value.trim().toUpperCase(), timeframe = $("timeframe").value;
+        const response = await fetch(`${apiBase()}/market/klines?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=500`);
+        const result = await response.json().catch(() => null); if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
+        app.candles = result; $("chartEmpty").classList.add("hidden"); drawChart(); updateReview();
+      } catch (error) { app.candles = []; $("chartEmpty").textContent = `K 线加载失败\n${error.message || error}`; drawChart(); }
+    }
+    function drawChart() {
+      const canvas = $("chart"), rect = canvas.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(rect.width * dpr)); canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+      const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr); const w = rect.width, h = rect.height;
+      ctx.fillStyle = "#02050c"; ctx.fillRect(0, 0, w, h); if (!app.candles.length) return;
+      const pad = { l: 20, r: 72, t: 34, b: 34 }, data = app.candles, startTs = data[0].ts, endTs = data.at(-1).ts;
+      const lineValues = [app.lines.entry, app.lines.stop].flatMap((line) => line ? [linePriceAt(line, startTs), linePriceAt(line, endTs)] : []).filter(Number.isFinite);
+      let min = Math.min(...data.map((x) => x.low), ...lineValues), max = Math.max(...data.map((x) => x.high), ...lineValues); const margin = (max - min || 1) * .06; min -= margin; max += margin;
+      const x = (ts) => pad.l + (ts - startTs) / (endTs - startTs || 1) * (w - pad.l - pad.r); const y = (price) => pad.t + (max - price) / (max - min || 1) * (h - pad.t - pad.b);
+      ctx.font = "11px ui-monospace, Menlo, monospace"; ctx.lineWidth = 1;
+      for (let i = 0; i <= 5; i++) { const yy = pad.t + (h - pad.t - pad.b) * i / 5, price = max - (max - min) * i / 5; ctx.strokeStyle = "#152033"; ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke(); ctx.fillStyle = "#7c8ca3"; ctx.textAlign = "right"; ctx.fillText(formatPrice(price), w - 6, yy + 4); }
+      const barWidth = Math.max(1, (w - pad.l - pad.r) / data.length * .7);
+      data.forEach((candle) => { const xx = x(candle.ts), up = candle.close >= candle.open; ctx.strokeStyle = up ? "#26a69a" : "#ef5350"; ctx.fillStyle = ctx.strokeStyle; ctx.beginPath(); ctx.moveTo(xx, y(candle.high)); ctx.lineTo(xx, y(candle.low)); ctx.stroke(); ctx.fillRect(xx - barWidth / 2, Math.min(y(candle.open), y(candle.close)), barWidth, Math.max(1, Math.abs(y(candle.open) - y(candle.close)))); });
+      [["entry", "#22d3ee", []], ["stop", "#f87171", [8, 6]]].forEach(([role, color, dash]) => { const line = app.lines[role]; if (!line) return; const p1 = linePriceAt(line, startTs), p2 = linePriceAt(line, endTs); if (![p1, p2].every(Number.isFinite)) return; ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x(startTs), y(p1)); ctx.lineTo(x(endTs), y(p2)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = "left"; ctx.fillText(role === "entry" ? "ENTRY" : "STOP", pad.l + 8, y(p1) - 8); });
+      const latest = app.currentStrategy?.current_price || data.at(-1).close, now = Date.now(); $("currentMetric").textContent = formatPrice(latest); $("entryMetric").textContent = formatPrice(linePriceAt(app.lines.entry, now)); $("stopMetric").textContent = formatPrice(linePriceAt(app.lines.stop, now));
+    }
+
+    function lineSummary(line) { if (!line) return "未设置"; return line.kind === "horizontal" ? `水平 @ ${formatPrice(line.price)}` : `趋势线 ${formatPrice(line.price1)} → ${formatPrice(line.price2)}`; }
+    function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char])); }
+    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value, chart_timezone: $("timezone").value.trim() || "UTC", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.lines.stop }; }
+    function validateForm() {
+      const p = strategyPayload(), errors = [];
+      if (!p.symbol) errors.push("请输入交易对"); if (!(p.notional_usdt > 0)) errors.push("名义仓位必须大于 0"); if (!Number.isInteger(p.leverage) || p.leverage < 1 || p.leverage > 125) errors.push("杠杆必须是 1–125 的整数");
+      if (!p.entry_line) errors.push("请识别并确认入场线"); if (!p.stop_line) errors.push("请识别并确认止损线");
+      const current = Number(app.currentStrategy?.current_price || app.candles.at(-1)?.close), stop = linePriceAt(p.stop_line, Date.now());
+      if (Number.isFinite(current) && Number.isFinite(stop)) { if (p.direction === "LONG" && stop >= current) errors.push("LONG 止损线必须低于当前价格"); if (p.direction === "SHORT" && stop <= current) errors.push("SHORT 止损线必须高于当前价格"); }
+      return errors;
+    }
+    function updateSteps() {
+      const current = app.lines.entry ? (app.lines.stop ? 4 : 3) : 2;
+      [1,2,3,4].forEach((n) => { const step = $(`step${n}`); step.classList.toggle("done", n < current); step.classList.toggle("active", n === current); });
+    }
+    function updateReview() {
+      const p = strategyPayload(), errors = validateForm();
+      $("reviewList").innerHTML = `<div class="review-row"><span>方向</span><b>${escapeHtml(p.direction)}</b></div><div class="review-row"><span>交易对</span><b>${escapeHtml(p.symbol || "--")}</b></div><div class="review-row"><span>名义仓位</span><b>${formatPrice(p.notional_usdt)} USDT</b></div><div class="review-row"><span>全仓杠杆</span><b>${p.leverage}×</b></div><div class="review-row"><span>入场线</span><b>${escapeHtml(lineSummary(p.entry_line))}</b></div><div class="review-row"><span>止损线</span><b>${escapeHtml(lineSummary(p.stop_line))}</b></div><div class="review-row"><span>模式</span><b>${escapeHtml(p.mode.toUpperCase())}</b></div>`;
+      $("armStrategy").disabled = errors.length > 0 || (app.currentStrategy && !terminalStatuses.has(app.currentStrategy.status));
+      setBadge("readyBadge", errors.length ? `${errors.length} 项待处理` : "可以启用", errors.length ? "warn" : "ok"); setBox("formStatus", errors.join("\n"), errors.length ? "error" : ""); updateSteps();
+    }
+
+    function openConfirm() {
+      const p = strategyPayload(); $("confirmSummary").textContent = `${p.direction} ${p.symbol}，名义仓位 ${formatPrice(p.notional_usdt)} USDT，全仓 ${p.leverage}×；启用后若当前价格已越过入场线将立即入场。`;
+      $("liveConfirmWrap").classList.toggle("hidden", p.mode !== "live"); $("liveConfirm").checked = false; $("confirmArm").disabled = p.mode === "live"; $("confirmDialog").showModal();
+    }
+    async function armStrategy() {
+      const button = $("confirmArm"); button.disabled = true; button.textContent = "启用中…";
+      try {
+        const response = await fetch(`${apiBase()}/strategy/watch`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(strategyPayload()) });
+        const result = await response.json().catch(() => null); if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
+        app.currentStrategy = result; $("confirmDialog").close(); setBox("formStatus", "策略已成功启用。", "ok"); renderStrategy(result); startPolling(result.strategy_id); updateReview();
+      } catch (error) { $("confirmDialog").close(); setBox("formStatus", `启用失败：${error.message || error}`, "error"); }
+      finally { button.textContent = "启用策略"; button.disabled = false; }
+    }
+
+    const statusOrder = ["armed", "entering", "position_open", "exiting", "completed"];
+    function renderStrategy(strategy) {
+      app.currentStrategy = strategy; $("strategyIdLabel").textContent = strategy.strategy_id ? `ID ${strategy.strategy_id.slice(0, 12)}…` : "尚未启用";
+      const bad = ["failed", "attention_required", "position_left_open"].includes(strategy.status); const done = ["completed", "cancelled"].includes(strategy.status);
+      setBadge("strategyBadge", strategy.status.toUpperCase(), bad ? "error" : done ? "ok" : "warn");
+      const feed = strategy.feed_state || "connecting"; $("feedPill").textContent = feed === "live" ? "实时行情已连接" : feed === "degraded" ? "REST 降级行情" : feed === "stale" ? "行情已失联" : "正在连接行情"; $("feedPill").className = `live-pill ${feed === "live" ? "live" : feed === "stale" ? "stale" : ""}`;
+      const index = statusOrder.indexOf(strategy.status); $("timeline").querySelectorAll("li").forEach((li, i) => { li.classList.toggle("done", index > i || strategy.status === "completed"); li.classList.toggle("current", index === i && !terminalStatuses.has(strategy.status)); });
+      setBox("monitorStatus", strategy.error ? `需要处理：${strategy.error}` : `当前价格 ${formatPrice(strategy.current_price)}\n入场线 ${formatPrice(strategy.entry_line_price)} · 止损线 ${formatPrice(strategy.stop_line_price)}${strategy.entry_price ? `\n入场均价 ${formatPrice(strategy.entry_price)} · 数量 ${formatPrice(strategy.filled_qty)}` : ""}`, strategy.error ? "error" : "info");
+      $("events").innerHTML = (strategy.events || []).slice().reverse().map((event) => `<div class="event"><time>${escapeHtml(new Date(event.ts).toLocaleString())}</time>${escapeHtml(event.message || "")}</div>`).join("");
+      $("cancelStrategy").classList.toggle("hidden", terminalStatuses.has(strategy.status));
+      app.lines.entry = strategy.entry_line; app.lines.stop = strategy.stop_line; drawChart(); updateReview();
+    }
+    function startPolling(id) { clearInterval(app.pollTimer); app.pollTimer = setInterval(async () => { try { const response = await fetch(`${apiBase()}/strategy/watch/${id}`); if (!response.ok) return; const result = await response.json(); renderStrategy(result); if (terminalStatuses.has(result.status)) clearInterval(app.pollTimer); } catch (_) {} }, 2000); }
+    async function restoreLatest() { try { const response = await fetch(`${apiBase()}/strategy/watch`); if (!response.ok) return; const items = await response.json(); const active = items.find((item) => !terminalStatuses.has(item.status)); if (active) { renderStrategy(active); startPolling(active.strategy_id); } } catch (_) {} }
+
+    async function cancelStrategy(closePosition) {
+      if (!app.currentStrategy) return;
+      try { const suffix = closePosition == null ? "" : `?close_position=${closePosition}`; const response = await fetch(`${apiBase()}/strategy/watch/${app.currentStrategy.strategy_id}${suffix}`, { method: "DELETE" }); const result = await response.json().catch(() => null); if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`); $("cancelDialog").close(); renderStrategy(result); startPolling(result.strategy_id); } catch (error) { $("cancelDialog").close(); setBox("monitorStatus", `取消失败：${error.message || error}`, "error"); }
+    }
+
+    ["entry", "stop"].forEach((role) => {
+      const zone = $(`${role}Paste`), input = $(`${role}File`);
+      zone.addEventListener("focus", () => setActiveRole(role)); zone.addEventListener("click", () => { setActiveRole(role); input.click(); }); zone.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); input.click(); } });
+      input.addEventListener("change", () => { if (input.files[0]) acceptImage(role, input.files[0]); input.value = ""; });
+      zone.addEventListener("dragover", (event) => { event.preventDefault(); zone.classList.add("dragging"); }); zone.addEventListener("dragleave", () => zone.classList.remove("dragging")); zone.addEventListener("drop", (event) => { event.preventDefault(); zone.classList.remove("dragging"); if (event.dataTransfer.files[0]) acceptImage(role, event.dataTransfer.files[0]); });
+      $(`${role}Recognize`).addEventListener("click", () => recognize(role)); $(`${role}Clear`).addEventListener("click", () => clearRole(role));
+    });
+    document.addEventListener("paste", (event) => { const file = Array.from(event.clipboardData?.items || []).find((item) => item.type.startsWith("image/"))?.getAsFile(); if (file) { event.preventDefault(); acceptImage(app.activeRole || (!app.images.entry ? "entry" : "stop"), file); } });
+    $("longBtn").onclick = () => setDirection("LONG"); $("shortBtn").onclick = () => setDirection("SHORT"); $("simulateBtn").onclick = () => setMode("simulate"); $("liveBtn").onclick = () => setMode("live");
+    ["symbol", "timeframe", "notional", "leverage", "timezone"].forEach((id) => $(id).addEventListener("input", () => { updateReview(); if (["symbol", "timeframe"].includes(id)) clearTimeout(window.chartReloadTimer), window.chartReloadTimer = setTimeout(loadChart, 500); }));
+    $("reloadChart").onclick = loadChart; $("armStrategy").onclick = openConfirm; $("confirmBack").onclick = () => $("confirmDialog").close(); $("confirmArm").onclick = armStrategy; $("liveConfirm").onchange = () => { $("confirmArm").disabled = !$("liveConfirm").checked; };
+    $("cancelStrategy").onclick = () => { const open = ["position_open", "exiting"].includes(app.currentStrategy?.status); if (!open) return cancelStrategy(false); $("cancelMessage").textContent = "策略已经入场。停止监控会让仓位失去这条止损保护，请明确选择。"; $("cancelDialog").showModal(); };
+    $("cancelBack").onclick = () => $("cancelDialog").close(); $("leavePosition").onclick = () => cancelStrategy(false); $("closePosition").onclick = () => cancelStrategy(true);
+    new ResizeObserver(drawChart).observe($("chart"));
+    setMode("simulate"); updateReview(); loadChart(); restoreLatest();
+  </script>
+</body>
+</html>
