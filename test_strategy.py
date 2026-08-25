@@ -37,6 +37,8 @@ class PreviewMarkupTests(unittest.TestCase):
         self.assertIn("canvas.onpointerdown", markup)
         self.assertIn("persistTrendlineWorkspace", markup)
         self.assertIn("distance=36", markup)
+        self.assertIn("function editorLineHit", markup)
+        self.assertIn("function finishLineDrag", markup)
 
 
 class LineSpecTests(unittest.TestCase):
