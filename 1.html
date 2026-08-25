@@ -342,8 +342,13 @@
       <button id="drawBtn">画趋势线（开/关）</button>
       <button id="clear">清空趋势线</button>
       <button id="export">导出最后一条趋势线到当前 payload</button>
+      <button id="recognizeCanvas">调用 Codex 识别当前画布</button>
 
-      <div id="chartStatus" class="status"></div>
+      <div class="hint">
+        Codex 会截取当前 K 线画布，识别最后画出的亮青色趋势线，并把识别结果回填到当前 payload。后端需配置 <code>OPENROUTER_API_KEY</code>。
+      </div>
+
+      <div id="chartStatus" class="status" role="status" aria-live="polite"></div>
     </div>
 
     <div class="panel ai-page-only page-only">
@@ -374,7 +379,7 @@
       <div id="previewWrap" class="preview empty">未选择截图</div>
 
       <button id="analyzeImage">调用后端 AI 识别截图</button>
-      <div id="aiStatus" class="status"></div>
+      <div id="aiStatus" class="status" role="status" aria-live="polite"></div>
 
       <label>AI 原始结构化结果</label>
       <textarea id="aiOut" readonly></textarea>
@@ -389,7 +394,7 @@
 
       <textarea id="out" readonly></textarea>
       <button id="submitPayload">提交当前 payload 到 /signal/watch</button>
-      <div id="apiStatus" class="status"></div>
+      <div id="apiStatus" class="status" role="status" aria-live="polite"></div>
 
       <label>后端返回</label>
       <textarea id="apiResult" readonly></textarea>
@@ -415,6 +420,7 @@ const pageHint = document.getElementById("pageHint");
 const navManual = document.getElementById("navManual");
 const navAi = document.getElementById("navAi");
 const drawBtn = document.getElementById("drawBtn");
+const recognizeCanvasBtn = document.getElementById("recognizeCanvas");
 
 const chartStatus = document.getElementById("chartStatus");
 const apiStatus = document.getElementById("apiStatus");
@@ -1392,6 +1398,48 @@ function draw() {
   if (!sc) return;
   const { xScale, yScale, pad, start, end } = sc;
 
+  ctx.save();
+  ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textBaseline = "middle";
+
+  const priceRange = Math.abs(sc.maxP - sc.minP);
+  const priceDigits = priceRange < 10 ? 4 : priceRange < 1000 ? 2 : 0;
+  for (let tick = 0; tick <= 4; tick++) {
+    const ratio = tick / 4;
+    const price = sc.maxP - priceRange * ratio;
+    const y = pad + (canvas.height - pad * 2) * ratio;
+    ctx.strokeStyle = "#151515";
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(canvas.width - pad, y);
+    ctx.stroke();
+    ctx.fillStyle = "#8a8a8a";
+    ctx.textAlign = "right";
+    ctx.fillText(price.toFixed(priceDigits), canvas.width - 4, y);
+  }
+
+  const indexSpan = Math.max(1, end - start);
+  for (let tick = 0; tick <= 4; tick++) {
+    const index = Math.round(start + indexSpan * tick / 4);
+    const candle = data[index];
+    if (!candle) continue;
+    const x = xScale(index);
+    ctx.strokeStyle = "#151515";
+    ctx.beginPath();
+    ctx.moveTo(x, pad);
+    ctx.lineTo(x, canvas.height - pad);
+    ctx.stroke();
+    ctx.fillStyle = "#8a8a8a";
+    ctx.textAlign = tick === 0 ? "left" : tick === 4 ? "right" : "center";
+    const timeLabel = new Date(candle.ts).toISOString().slice(0, 16).replace("T", " ");
+    ctx.fillText(timeLabel, x, canvas.height - 13);
+  }
+
+  ctx.fillStyle = "#b8b8b8";
+  ctx.textAlign = "left";
+  ctx.fillText(`${getSharedInputs().symbol} · ${getSharedInputs().timeframe} · UTC`, pad + 6, 16);
+  ctx.restore();
+
   const visibleCount = end - start + 1;
   const barW = Math.max(2, (canvas.width - pad * 2) / visibleCount * 0.7);
 
@@ -1614,35 +1662,24 @@ async function readFileAsDataUrl(file) {
   });
 }
 
-async function analyzeScreenshot() {
-  clearStatus(aiStatus);
-  const file = screenshotInput.files && screenshotInput.files[0];
-
-  if (!file) {
-    setStatus(aiStatus, "请先选择一张 TradingView 截图。", "error");
-    return;
-  }
-
-  setButtonBusy(analyzeImageBtn, true, "识别中...");
-  aiOut.value = "";
-
+async function recognizeImageWithCodex(imageDataUrl, options = {}) {
+  const statusEl = options.statusEl || aiStatus;
+  const sourceName = options.sourceName || "截图";
   try {
     await ensureCurrentSeriesLoaded();
     const baseUrl = getApiBaseUrl();
     if (!baseUrl) {
-      setStatus(aiStatus, "请输入 API base URL。", "error");
-      return;
+      throw new Error("请输入 API base URL。");
     }
 
-    const imageDataUrl = await readFileAsDataUrl(file);
     const body = {
       ...getSharedInputs(),
       chart_timezone: (chartTimezoneInput.value || "UTC").trim() || "UTC",
-      target_line_hint: (lineHintInput.value || "").trim() || null,
+      target_line_hint: options.targetLineHint || (lineHintInput.value || "").trim() || null,
       image_data_url: imageDataUrl
     };
 
-    setStatus(aiStatus, `正在提交截图到 ${baseUrl}/ai/recognize ...`, "info");
+    setStatus(statusEl, `正在调用 Codex 识别${sourceName}，通常需要几十秒…`, "info");
 
     const res = await fetch(`${baseUrl}/ai/recognize`, {
       method: "POST",
@@ -1675,11 +1712,11 @@ async function analyzeScreenshot() {
 
     if (!recovered.ready_for_api) {
       setStatus(
-        aiStatus,
+        statusEl,
         `识别未达到可提交状态。\n${recovered.notes || "模型无法可靠恢复趋势线锚点，请换更清晰截图或补充 target_line_hint。"}`,
         "warn"
       );
-      return;
+      return null;
     }
 
     setCurrentPayload(recovered.api_payload);
@@ -1698,15 +1735,16 @@ async function analyzeScreenshot() {
       .filter(Boolean)
       .join("\n");
     setStatus(
-      aiStatus,
+      statusEl,
       `识别完成，confidence=${recovered.confidence.toFixed(3)}，trendline_kind=${recovered.trendline_kind}。已写入当前 payload。${suffix}`,
       level
     );
+    return recovered;
   } catch (e) {
     const message = e?.message || String(e);
     if (message === "Failed to fetch") {
       setStatus(
-        aiStatus,
+        statusEl,
         [
           "识别失败：Failed to fetch",
           `当前请求地址：${getApiBaseUrl()}/ai/recognize`,
@@ -1715,12 +1753,81 @@ async function analyzeScreenshot() {
         ].join("\n"),
         "error"
       );
-      return;
+      return null;
     }
 
-    setStatus(aiStatus, "识别失败：\n" + message, "error");
+    setStatus(statusEl, "识别失败：\n" + message, "error");
+    return null;
+  }
+}
+
+async function analyzeScreenshot() {
+  clearStatus(aiStatus);
+  const file = screenshotInput.files && screenshotInput.files[0];
+
+  if (!file) {
+    setStatus(aiStatus, "请先选择一张 TradingView 截图。", "error");
+    return;
+  }
+
+  setButtonBusy(analyzeImageBtn, true, "Codex 识别中…");
+  aiOut.value = "";
+
+  try {
+    const imageDataUrl = await readFileAsDataUrl(file);
+    await recognizeImageWithCodex(imageDataUrl, {
+      statusEl: aiStatus,
+      sourceName: "截图"
+    });
+  } catch (error) {
+    setStatus(aiStatus, "截图读取失败：\n" + (error?.message || String(error)), "error");
   } finally {
     setButtonBusy(analyzeImageBtn, false);
+  }
+}
+
+function captureManualTrendlineCanvas(manualLine) {
+  const originalLines = lines;
+  try {
+    lines = [manualLine];
+    draw();
+    return canvas.toDataURL("image/png");
+  } finally {
+    lines = originalLines;
+    draw();
+  }
+}
+
+async function analyzeCurrentCanvas() {
+  clearStatus(chartStatus);
+  const manualLines = lines.filter((line) => line.source === "manual");
+
+  if (!manualLines.length) {
+    setStatus(chartStatus, "请先在图上画一条趋势线，再调用 Codex 识别。", "error");
+    return;
+  }
+
+  const shared = getSharedInputs();
+  if (loadedSeriesMeta.symbol !== shared.symbol || loadedSeriesMeta.timeframe !== shared.timeframe) {
+    setStatus(chartStatus, "共享参数已改变。请重新加载 K 线并重画趋势线后再识别。", "error");
+    return;
+  }
+
+  setDrawMode(false);
+  setButtonBusy(recognizeCanvasBtn, true, "Codex 识别中…");
+  aiOut.value = "";
+
+  try {
+    const imageDataUrl = captureManualTrendlineCanvas(manualLines[manualLines.length - 1]);
+    await recognizeImageWithCodex(imageDataUrl, {
+      statusEl: chartStatus,
+      sourceName: "当前画布",
+      targetLineHint: "识别图中用户最后画出的亮青色（#4dd0e1）趋势线；该线带有两个亮青色圆形锚点，请忽略黄色 AI 识别线、K 线和网格线。"
+    });
+  } catch (error) {
+    setStatus(chartStatus, "画布截图失败：\n" + (error?.message || String(error)), "error");
+  } finally {
+    setButtonBusy(recognizeCanvasBtn, false);
   }
 }
 
@@ -1986,6 +2093,7 @@ window.addEventListener("mousemove", (e) => {
 drawBtn.onclick = () => setDrawMode(!drawMode);
 document.getElementById("reload").onclick = loadData;
 document.getElementById("analyzeImage").onclick = analyzeScreenshot;
+document.getElementById("recognizeCanvas").onclick = analyzeCurrentCanvas;
 document.getElementById("submitPayload").onclick = submitCurrentPayload;
 
 document.getElementById("clear").onclick = () => {
