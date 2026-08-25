@@ -61,21 +61,18 @@ docker compose logs -f api
 
 ### Codex 截图识别
 
-- `OPENAI_API_KEY`：必填，调用 OpenAI Responses API
-- `OPENAI_API_URL`：默认 `https://api.openai.com/v1/responses`
-- `CODEX_MODEL`：默认 `gpt-5.3-codex`
-- `CF_ACCESS_CLIENT_ID`、`CF_ACCESS_CLIENT_SECRET`：可选；当 `OPENAI_API_URL` 指向受 Cloudflare Access 保护的 Worker 时，填写 Access Service Token。后端会分别发送 `CF-Access-Client-Id` 和 `CF-Access-Client-Secret` 请求头；两项必须同时配置
+- `CODEX_AUTH_FILE`：宿主机 Codex CLI 登录文件，Compose 默认 `/root/.codex/auth.json`
+- `CODEX_MODEL`：可选；留空时使用 Codex CLI 默认模型
+- `CODEX_TIMEOUT_SECONDS`：单次截图识别超时，默认 180 秒，可用范围 30–600 秒
 
-Cloudflare Worker Access 示例：
+截图识别直接执行容器内的 `codex exec`，使用 `--ephemeral`、只读沙箱和 JSON Schema 输出，不需要 `OPENAI_API_KEY`。部署前先确认宿主机已经登录：
 
 ```bash
-OPENAI_API_URL=https://codex-proxy.example.workers.dev/v1/responses \
-CF_ACCESS_CLIENT_ID=your-service-token-id.access \
-CF_ACCESS_CLIENT_SECRET=your-service-token-secret \
+codex login status
 docker compose up -d --build
 ```
 
-Service Token 只保存在服务端环境变量中，不要写入 HTML 或浏览器代码。Worker 后面的接口需与 OpenAI Responses API 请求和响应格式兼容。
+Compose 只把 `auth.json` 挂载到容器的 `/codex-home/auth.json`，不会挂载完整的 `~/.codex`。该文件包含登录令牌，应按密码保护、禁止提交到 Git，并保持可写以便 Codex 刷新令牌。非 root 用户或自定义 Codex 目录可设置 `CODEX_AUTH_FILE=/path/to/auth.json`。
 
 ### Binance Futures
 
@@ -96,7 +93,6 @@ Service Token 只保存在服务端环境变量中，不要写入 HTML 或浏览
 实盘示例：
 
 ```bash
-OPENAI_API_KEY=sk-... \
 BINANCE_API_KEY=your_key \
 BINANCE_API_SECRET=your_secret \
 ENABLE_LIVE_FUTURES=true \

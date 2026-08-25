@@ -1,8 +1,19 @@
+FROM node:24-slim AS codex-cli
+
+ARG CODEX_CLI_VERSION=0.149.1
+RUN npm install --global "@openai/codex@${CODEX_CLI_VERSION}"
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    MPLBACKEND=Agg
+    MPLBACKEND=Agg \
+    CODEX_HOME=/codex-home
+
+COPY --from=codex-cli /usr/local/bin/node /usr/local/bin/node
+COPY --from=codex-cli /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
+    && mkdir -p /codex-home
 
 WORKDIR /app
 

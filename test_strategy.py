@@ -176,40 +176,33 @@ class StrategyRuntimeTests(unittest.TestCase):
 
 
 class RecognitionTests(unittest.TestCase):
-    def test_codex_headers_without_cloudflare_access(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(main.get_codex_headers("test-key"), {"Authorization": "Bearer test-key"})
+    def test_local_codex_uses_saved_login_and_structured_output(self):
+        captured = {}
 
-    def test_codex_headers_include_cloudflare_access_service_token(self):
-        with patch.dict(
-            os.environ,
-            {"CF_ACCESS_CLIENT_ID": "client-id.access", "CF_ACCESS_CLIENT_SECRET": "client-secret"},
-            clear=True,
-        ):
-            self.assertEqual(
-                main.get_codex_headers("test-key"),
-                {
-                    "Authorization": "Bearer test-key",
-                    "CF-Access-Client-Id": "client-id.access",
-                    "CF-Access-Client-Secret": "client-secret",
-                },
-            )
+        def run(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs["env"]
+            output_path = command[command.index("--output-last-message") + 1]
+            with open(output_path, "w", encoding="utf-8") as output:
+                output.write('{"ready": true}')
+            return main.subprocess.CompletedProcess(command, 0, stdout='{"ready": true}', stderr="")
 
-    def test_codex_headers_reject_partial_cloudflare_access_config(self):
-        with patch.dict(os.environ, {"CF_ACCESS_CLIENT_ID": "client-id.access"}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "必须同时配置"):
-                main.get_codex_headers("test-key")
-
-    def test_extract_codex_response_json_from_output_message(self):
-        response = {
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": '{"ready": true}'}],
-                }
-            ]
+        env = {
+            "OPENAI_API_KEY": "must-not-leak",
+            "CODEX_API_KEY": "must-not-leak",
+            "CODEX_MODEL": "gpt-test-codex",
         }
-        self.assertEqual(main.extract_codex_response_json(response), {"ready": True})
+        with patch.dict(os.environ, env, clear=True), patch.object(main.subprocess, "run", side_effect=run):
+            result = main.run_local_codex("recognize", b"image", "image/png", {"type": "object"})
+
+        self.assertEqual(result, {"ready": True})
+        self.assertNotIn("OPENAI_API_KEY", captured["env"])
+        self.assertNotIn("CODEX_API_KEY", captured["env"])
+        self.assertIn("--ephemeral", captured["command"])
+        self.assertIn("--output-schema", captured["command"])
+        self.assertIn("--image", captured["command"])
+        self.assertEqual(captured["command"][-2:], ["--model", "gpt-test-codex"])
+        self.assertEqual(captured["command"][2], "recognize")
 
     def test_horizontal_recognition_maps_to_line_spec_and_geometry(self):
         parsed = {
@@ -229,26 +222,17 @@ class RecognitionTests(unittest.TestCase):
             role="entry",
             expected_line_type="auto",
         )
-        response = {
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": main.json.dumps(parsed)}],
-                }
-            ]
-        }
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), patch.object(
-            main, "decode_image_data_url", return_value=(b"x", "image/png")
-        ), patch.object(main, "request_json", return_value=response) as request_mock:
+        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
+            main, "run_local_codex", return_value=parsed
+        ) as codex_mock:
             result = main.recognize_chart_line(payload)
         self.assertTrue(result["ready_for_strategy"])
         self.assertEqual(result["line"]["kind"], "horizontal")
         self.assertEqual(result["line"]["price"], 98765.5)
         self.assertEqual(result["image_geometry"]["x2"], 0.9)
-        request_body = request_mock.call_args.kwargs["payload"]
-        self.assertEqual(request_body["model"], "gpt-5.3-codex")
-        self.assertIn("input", request_body)
-        self.assertNotIn("messages", request_body)
+        self.assertEqual(codex_mock.call_args.args[1], b"x")
+        self.assertEqual(codex_mock.call_args.args[2], "image/png")
+        self.assertEqual(codex_mock.call_args.args[3], main.LINE_RECOGNITION_SCHEMA["schema"])
 
 
 if __name__ == "__main__":

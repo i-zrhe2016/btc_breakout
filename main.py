@@ -10,6 +10,8 @@ import math
 import os
 import re
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -34,8 +36,6 @@ app = FastAPI(title="Trendline Breakout API", version="0.1.0")
 
 DEFAULT_BARK_NOTIFY_URL = "https://api.day.app/j32eBocVfwx6kvf8xr452K/"
 DEFAULT_BINANCE_BASE_URL = "https://api.binance.us"
-DEFAULT_OPENAI_API_URL = "https://api.openai.com/v1/responses"
-DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 LOG_LEVEL = str(os.getenv("LOG_LEVEL") or "INFO").upper()
 logging.basicConfig(
@@ -435,19 +435,6 @@ def request_bytes(url: str, *, headers: Optional[dict[str, str]] = None, timeout
         return resp.read(), resp.headers.get_content_type()
 
 
-def get_codex_headers(api_key: str) -> dict[str, str]:
-    """Build OpenAI headers, optionally authenticating through Cloudflare Access."""
-    headers = {"Authorization": f"Bearer {api_key}"}
-    client_id = str(os.getenv("CF_ACCESS_CLIENT_ID") or "").strip()
-    client_secret = str(os.getenv("CF_ACCESS_CLIENT_SECRET") or "").strip()
-    if bool(client_id) != bool(client_secret):
-        raise RuntimeError("CF_ACCESS_CLIENT_ID 和 CF_ACCESS_CLIENT_SECRET 必须同时配置")
-    if client_id:
-        headers["CF-Access-Client-Id"] = client_id
-        headers["CF-Access-Client-Secret"] = client_secret
-    return headers
-
-
 def get_zoneinfo(name: Optional[str]) -> ZoneInfo:
     value = str(name or "UTC").strip() or "UTC"
     try:
@@ -560,22 +547,6 @@ def decode_image_data_url(data_url: str) -> tuple[bytes, str]:
     return image_bytes, mime
 
 
-def message_content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts)
-    if isinstance(content, dict):
-        return json.dumps(content, ensure_ascii=False)
-    return ""
-
-
 def extract_json_object(text: Any) -> dict[str, Any]:
     trimmed = str(text or "").strip()
     if not trimmed:
@@ -605,31 +576,91 @@ def extract_json_object(text: Any) -> dict[str, Any]:
     raise ValueError("模型返回中未找到 JSON 对象")
 
 
-def extract_codex_response_json(response: Any) -> dict[str, Any]:
-    """Extract a structured JSON object from an OpenAI Responses API response."""
-    if not isinstance(response, dict):
-        raise RuntimeError("Codex 响应格式无效")
+CODEX_EXEC_LOCK = threading.Lock()
 
-    output_text = response.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return extract_json_object(output_text)
 
-    parts: list[str] = []
-    for item in response.get("output") or []:
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        for content in item.get("content") or []:
-            if not isinstance(content, dict) or content.get("type") != "output_text":
-                continue
-            if isinstance(content.get("text"), str):
-                parts.append(content["text"])
-    if parts:
-        return extract_json_object("\n".join(parts))
+def run_local_codex(
+    prompt: str,
+    image_bytes: bytes,
+    image_content_type: str,
+    output_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the locally authenticated Codex CLI with one image and a JSON schema."""
+    cli_path = str(os.getenv("CODEX_CLI_PATH") or "codex").strip() or "codex"
+    model = str(os.getenv("CODEX_MODEL") or "").strip()
+    try:
+        timeout_seconds = int(str(os.getenv("CODEX_TIMEOUT_SECONDS") or "180"))
+    except ValueError as exc:
+        raise RuntimeError("CODEX_TIMEOUT_SECONDS 必须是整数") from exc
+    timeout_seconds = max(30, min(timeout_seconds, 600))
 
-    error = response.get("error")
-    if isinstance(error, dict) and error.get("message"):
-        raise RuntimeError(f"Codex 请求失败: {error['message']}")
-    raise RuntimeError("Codex 响应缺少 output_text")
+    suffix_by_type = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    image_suffix = suffix_by_type.get(str(image_content_type or "").lower(), ".img")
+
+    with tempfile.TemporaryDirectory(prefix="btc-codex-") as temp_dir:
+        temp_path = Path(temp_dir)
+        image_path = temp_path / f"chart{image_suffix}"
+        schema_path = temp_path / "schema.json"
+        output_path = temp_path / "result.json"
+        image_path.write_bytes(image_bytes)
+        schema_path.write_text(json.dumps(output_schema, ensure_ascii=False), encoding="utf-8")
+
+        command = [
+            cli_path,
+            "exec",
+            prompt,
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(output_path),
+            "--image",
+            str(image_path),
+        ]
+        if model:
+            command.extend(["--model", model])
+
+        child_env = os.environ.copy()
+        child_env.pop("OPENAI_API_KEY", None)
+        child_env.pop("CODEX_API_KEY", None)
+        try:
+            with CODEX_EXEC_LOCK:
+                completed = subprocess.run(
+                    command,
+                    cwd=temp_dir,
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"本地 Codex CLI 不存在: {cli_path}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"本地 Codex CLI 调用超时（{timeout_seconds} 秒）") from exc
+
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "unknown error").strip()
+            if len(detail) > 2000:
+                detail = detail[-2000:]
+            raise RuntimeError(f"本地 Codex CLI 调用失败（exit={completed.returncode}）: {detail}")
+        if not output_path.exists():
+            raise RuntimeError("本地 Codex CLI 未生成结构化输出")
+        try:
+            return extract_json_object(output_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"本地 Codex CLI 输出无效: {exc}") from exc
 
 
 def validate_ai_payload(payload: dict[str, Any]) -> None:
@@ -1545,41 +1576,13 @@ def recognize_trendline_from_image_with_candles(
     *,
     image_content_type: str = "image/jpeg",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    api_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY 未配置")
-
-    model = str(os.getenv("CODEX_MODEL") or DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
     candles = fetch_klines(inputs.symbol, inputs.timeframe)
-    image_data_url = "data:{mime};base64,{payload}".format(
-        mime=image_content_type or "image/jpeg",
-        payload=base64.b64encode(image_bytes).decode("ascii"),
+    parsed = run_local_codex(
+        f"{CODEX_SYSTEM_PROMPT}\n\n{build_codex_user_prompt(inputs)}",
+        image_bytes,
+        image_content_type,
+        CODEX_RESPONSE_SCHEMA["schema"],
     )
-    body = {
-        "model": model,
-        "instructions": CODEX_SYSTEM_PROMPT,
-        "max_output_tokens": 4000,
-        "store": False,
-        "text": {"format": CODEX_RESPONSE_SCHEMA},
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": build_codex_user_prompt(inputs)},
-                    {"type": "input_image", "image_url": image_data_url, "detail": "high"},
-                ],
-            },
-        ],
-    }
-
-    response_json = request_json(
-        str(os.getenv("OPENAI_API_URL") or DEFAULT_OPENAI_API_URL).strip(),
-        method="POST",
-        payload=body,
-        headers=get_codex_headers(api_key),
-        timeout=120,
-    )
-    parsed = extract_codex_response_json(response_json)
     normalized = normalize_ai_result(parsed, inputs)
     return finalize_recognized_payload(normalized, candles, inputs), candles
 
@@ -2922,11 +2925,6 @@ def maybe_start_telegram_bot() -> None:
         logger.info("Telegram bot disabled: TELEGRAM_BOT_TOKEN not configured")
         return
 
-    openai_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
-    if not openai_key:
-        logger.warning("Telegram bot disabled: OPENAI_API_KEY not configured")
-        return
-
     if TELEGRAM_BOT_THREAD is not None and TELEGRAM_BOT_THREAD.is_alive():
         return
 
@@ -3123,7 +3121,7 @@ def ai_recognize(payload: AiRecognitionRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         detail = str(exc)
-        status_code = 500 if "OPENAI_API_KEY 未配置" in detail else 502
+        status_code = 500 if "本地 Codex CLI 不存在" in detail else 502
         raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
@@ -3488,10 +3486,6 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
     image_bytes, image_type = decode_image_data_url(payload.image_data_url)
     if len(image_bytes) > 10 * 1024 * 1024:
         raise ValueError("截图不能超过 10MB")
-    api_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY 未配置")
-    image_url = f"data:{image_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
     prompt = "\n".join(
         [
             "识别截图中用于自动交易的唯一一条人工绘制线。只输出严格 JSON。",
@@ -3503,30 +3497,12 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
             "忽略 K 线、均线、网格、十字光标、订单标记和价格轴边框。",
         ]
     )
-    body = {
-        "model": str(os.getenv("CODEX_MODEL") or DEFAULT_CODEX_MODEL),
-        "instructions": "你是严谨的金融图表线段识别器。",
-        "max_output_tokens": 4000,
-        "store": False,
-        "text": {"format": LINE_RECOGNITION_SCHEMA},
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": image_url, "detail": "high"},
-                ],
-            },
-        ],
-    }
-    response = request_json(
-        str(os.getenv("OPENAI_API_URL") or DEFAULT_OPENAI_API_URL),
-        method="POST",
-        payload=body,
-        headers=get_codex_headers(api_key),
-        timeout=120,
+    parsed = run_local_codex(
+        f"你是严谨的金融图表线段识别器。\n\n{prompt}",
+        image_bytes,
+        image_type,
+        LINE_RECOGNITION_SCHEMA["schema"],
     )
-    parsed = extract_codex_response_json(response)
 
     expected = payload.expected_line_type
     line_type = parsed.get("line_type")
@@ -3869,7 +3845,7 @@ def ai_line_recognize(payload: LineRecognitionRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        status_code = 500 if "OPENAI_API_KEY 未配置" in str(exc) else 502
+        status_code = 500 if "本地 Codex CLI 不存在" in str(exc) else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
