@@ -2,9 +2,19 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import main
+
+
+class PreviewMarkupTests(unittest.TestCase):
+    def test_preview_bounds_trendline_to_anchor_interval(self):
+        markup = (Path(__file__).parent / "preview.html").read_text(encoding="utf-8")
+        self.assertIn("趋势线只绘制 P1–P2 锚点区间", markup)
+        self.assertIn("segmentStart", markup)
+        self.assertIn("segmentEnd", markup)
+        self.assertIn("趋势线仅显示锚点区间", markup)
 
 
 class LineSpecTests(unittest.TestCase):
@@ -344,6 +354,32 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(codex_mock.call_args.args[1], b"x")
         self.assertEqual(codex_mock.call_args.args[2], "image/png")
         self.assertEqual(codex_mock.call_args.args[3], main.LINE_RECOGNITION_SCHEMA["schema"])
+
+    def test_auto_timeframe_uses_detected_left_corner_period(self):
+        parsed_timeframe = {"detected_timeframe": "4h", "confidence": 0.95, "evidence": "左上角显示 4h"}
+        parsed_line = {
+            "ready": True,
+            "confidence": 0.9,
+            "line_type": "horizontal",
+            "horizontal_price": 98765.5,
+            "anchors": [
+                {"time_iso": None, "timestamp_ms": None, "price": 98765.5},
+                {"time_iso": None, "timestamp_ms": None, "price": 98765.5},
+            ],
+            "image_geometry": {"x1": 0.1, "y1": 0.4, "x2": 0.9, "y2": 0.4},
+            "notes": "line",
+        }
+        payload = main.LineRecognitionRequest(
+            image_data_url="data:image/png;base64,eA==",
+            role="entry",
+            timeframe="auto",
+        )
+        with patch.object(main, "decode_image_data_url", return_value=(b"x", "image/png")), patch.object(
+            main, "run_local_codex", side_effect=[parsed_timeframe, parsed_line]
+        ):
+            result = main.recognize_chart_line(payload)
+        self.assertEqual(result["detected_timeframe"], "4h")
+        self.assertEqual(result["timeframe"], "4h")
 
     def test_timeframe_mismatch_rejects_before_line_recognition(self):
         payload = main.LineRecognitionRequest(

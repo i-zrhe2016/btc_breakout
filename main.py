@@ -3691,8 +3691,8 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
         "\n".join(
             [
                 "你是严谨的 K 线截图周期识别器。只输出严格 JSON。",
-                "先读取图表顶部的周期按钮、标题或时间轴刻度，判断当前 K 线周期。",
-                f"用户期望周期是 {payload.timeframe}，但不要迎合用户，必须按截图实际内容判断。",
+                "优先读取截图左上角的 TradingView 周期按钮/标签；如果左上角没有，再参考标题和时间轴刻度。",
+                f"用户期望周期是 {payload.timeframe if payload.timeframe != 'auto' else '自动识别'}，但不要迎合用户，必须按截图实际内容判断。",
                 "无法可靠判断时返回 unknown。不要识别画线，也不要做其他任务。",
             ]
         ),
@@ -3708,7 +3708,8 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
         raise ValueError(
             f"截图周期识别置信度不足（检测为 {detected_timeframe}，{timeframe_confidence:.0%}），已停止画线识别"
         )
-    if detected_timeframe != payload.timeframe:
+    effective_timeframe = detected_timeframe
+    if payload.timeframe != "auto" and detected_timeframe != payload.timeframe:
         raise ValueError(
             f"截图周期不匹配：检测为 {detected_timeframe}，当前选择为 {payload.timeframe}；已停止画线识别"
         )
@@ -3716,7 +3717,7 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
         [
             "识别截图中用于自动交易的唯一一条人工绘制线。只输出严格 JSON。",
             f"用途: {payload.role}；期望线型: {payload.expected_line_type}。",
-            f"symbol={payload.symbol}, timeframe={payload.timeframe}, chart_timezone={payload.chart_timezone}。",
+            f"symbol={payload.symbol}, timeframe={effective_timeframe}, chart_timezone={payload.chart_timezone}。",
             f"目标提示: {payload.target_line_hint or '无'}。",
             "水平线返回 horizontal_price；趋势线返回两个最接近实际锚点的 anchors。",
             "image_geometry 是线段在整张图片中的归一化端点，左上角为 (0,0)，右下角为 (1,1)。",
@@ -3761,7 +3762,7 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
         "confidence": confidence,
         "role": payload.role,
         "symbol": payload.symbol,
-        "timeframe": payload.timeframe,
+        "timeframe": effective_timeframe,
         "detected_timeframe": detected_timeframe,
         "timeframe_confidence": timeframe_confidence,
         "line": line.model_dump() if line else None,

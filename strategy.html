@@ -321,7 +321,7 @@
       </div>
 
       <section class="panel chart-panel" aria-labelledby="chartTitle">
-        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>大画布显示识别结果；左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button><a class="chart-expand" href="/preview">打开大画布</a></div></div>
+        <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>大画布显示识别结果；趋势线只连接两个锚点，左侧参数可手动调整并实时更新</p></div><div class="inline-actions" style="margin-top:0"><span id="chartSource" class="badge">FUTURES</span><button id="reloadChart" class="ghost" type="button">刷新 K 线</button><a class="chart-expand" href="/preview">打开大画布</a></div></div>
         <div class="chart-wrap">
           <canvas id="chart" role="img" aria-label="BTC 合约 K 线、入场线与止损线预览；下方提供当前价格和两条线的文字数值"></canvas>
           <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span id="stopLegend" class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
@@ -572,14 +572,14 @@
       ctx.fillStyle = "#02050c"; ctx.fillRect(0, 0, w, h); if (!app.candles.length) return;
       const pad = { l: 20, r: 72, t: 34, b: 34 }, data = app.candles, startTs = data[0].ts, endTs = data.at(-1).ts;
       const visibleStopLine = app.stopEnabled ? app.lines.stop : null;
-      const lineValues = [app.lines.entry, visibleStopLine].flatMap((line) => line ? [linePriceAt(line, startTs), linePriceAt(line, endTs)] : []).filter(Number.isFinite);
+      const lineValues = [app.lines.entry, visibleStopLine].flatMap((line) => { if (!line) return []; return line.kind === "trendline" ? [Number(line.price1), Number(line.price2)] : [linePriceAt(line, startTs), linePriceAt(line, endTs)]; }).filter(Number.isFinite);
       let min = Math.min(...data.map((x) => x.low), ...lineValues), max = Math.max(...data.map((x) => x.high), ...lineValues); const margin = (max - min || 1) * .06; min -= margin; max += margin;
       const x = (ts) => pad.l + (ts - startTs) / (endTs - startTs || 1) * (w - pad.l - pad.r); const y = (price) => pad.t + (max - price) / (max - min || 1) * (h - pad.t - pad.b);
       ctx.font = "11px ui-monospace, Menlo, monospace"; ctx.lineWidth = 1;
       for (let i = 0; i <= 5; i++) { const yy = pad.t + (h - pad.t - pad.b) * i / 5, price = max - (max - min) * i / 5; ctx.strokeStyle = "#152033"; ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke(); ctx.fillStyle = "#7c8ca3"; ctx.textAlign = "right"; ctx.fillText(formatPrice(price), w - 6, yy + 4); }
       const barWidth = Math.max(1, (w - pad.l - pad.r) / data.length * .7);
       data.forEach((candle) => { const xx = x(candle.ts), up = candle.close >= candle.open; ctx.strokeStyle = up ? "#26a69a" : "#ef5350"; ctx.fillStyle = ctx.strokeStyle; ctx.beginPath(); ctx.moveTo(xx, y(candle.high)); ctx.lineTo(xx, y(candle.low)); ctx.stroke(); ctx.fillRect(xx - barWidth / 2, Math.min(y(candle.open), y(candle.close)), barWidth, Math.max(1, Math.abs(y(candle.open) - y(candle.close)))); });
-      [["entry", "#22d3ee", []], ["stop", "#f87171", [8, 6]]].forEach(([role, color, dash]) => { const line = role === "stop" ? visibleStopLine : app.lines[role]; if (!line) return; const p1 = linePriceAt(line, startTs), p2 = linePriceAt(line, endTs); if (![p1, p2].every(Number.isFinite)) return; ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x(startTs), y(p1)); ctx.lineTo(x(endTs), y(p2)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = "left"; ctx.fillText(role === "entry" ? "ENTRY" : "STOP", pad.l + 8, y(p1) - 8); });
+      [["entry", "#22d3ee", []], ["stop", "#f87171", [8, 6]]].forEach(([role, color, dash]) => { const line = role === "stop" ? visibleStopLine : app.lines[role]; if (!line) return; let lineStart = startTs, lineEnd = endTs; if (line.kind === "trendline") { const anchorStart = Math.min(Number(line.ts1), Number(line.ts2)), anchorEnd = Math.max(Number(line.ts1), Number(line.ts2)); lineStart = Math.max(startTs, anchorStart); lineEnd = Math.min(endTs, anchorEnd); if (!Number.isFinite(lineStart) || !Number.isFinite(lineEnd) || lineEnd <= lineStart) return; } const p1 = linePriceAt(line, lineStart), p2 = linePriceAt(line, lineEnd); if (![p1, p2].every(Number.isFinite)) return; ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x(lineStart), y(p1)); ctx.lineTo(x(lineEnd), y(p2)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = "left"; ctx.fillText(role === "entry" ? "ENTRY" : "STOP", x(lineStart) + 8, y(p1) - 8); });
       const latest = app.currentStrategy?.current_price || data.at(-1).close, now = Date.now(); $("currentMetric").textContent = formatPrice(latest); $("entryMetric").textContent = formatPrice(linePriceAt(app.lines.entry, now)); $("stopMetric").textContent = app.stopEnabled ? formatPrice(linePriceAt(app.lines.stop, now)) : "未启用";
     }
 
