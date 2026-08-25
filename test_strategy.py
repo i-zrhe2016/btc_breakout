@@ -36,6 +36,7 @@ class PreviewMarkupTests(unittest.TestCase):
         self.assertIn('id="applyTrendline"', markup)
         self.assertIn("canvas.onpointerdown", markup)
         self.assertIn("persistTrendlineWorkspace", markup)
+        self.assertIn("distance=36", markup)
 
 
 class LineSpecTests(unittest.TestCase):
