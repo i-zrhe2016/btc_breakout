@@ -142,6 +142,11 @@
     .line-editor { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
     .line-editor-title { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 10px; }
     .inline-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .option-toggle { display: flex; align-items: flex-start; gap: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; cursor: pointer; }
+    .option-toggle input { width: 20px; min-height: 20px; margin: 2px 0 0; accent-color: var(--cyan); }
+    .option-toggle strong { display: block; }
+    .option-toggle small { display: block; color: var(--muted); margin-top: 2px; }
+    .disabled-options { opacity: .42; filter: saturate(.45); }
 
     button.primary, button.secondary, button.danger, button.ghost {
       min-height: 44px; border-radius: 9px; padding: 9px 13px; cursor: pointer; border: 1px solid transparent; font-weight: 650;
@@ -241,8 +246,8 @@
     <section class="hero">
       <div>
         <div class="eyebrow">Two-image strategy builder</div>
-        <h1>粘贴两张截图，建立入场与止损</h1>
-        <p>分别识别水平线或趋势线，人工确认位置后启用 LONG / SHORT 策略。默认仅模拟，不会发送真实订单。</p>
+        <h1>粘贴入场截图，按需添加止损</h1>
+        <p>入场线必选，止损线可选；分别识别水平线或趋势线后启用 LONG / SHORT 策略。默认仅模拟，不会发送真实订单。</p>
       </div>
       <div id="feedPill" class="live-pill">尚未启用策略</div>
     </section>
@@ -250,7 +255,7 @@
     <div class="steps" aria-label="策略创建步骤">
       <div class="step active" id="step1"><b>01</b>交易设置</div>
       <div class="step" id="step2"><b>02</b>识别入场线</div>
-      <div class="step" id="step3"><b>03</b>识别止损线</div>
+      <div class="step" id="step3"><b>03</b>设置可选止损</div>
       <div class="step" id="step4"><b>04</b>确认并启用</div>
     </div>
 
@@ -291,8 +296,10 @@
         </section>
 
         <section class="panel line-card" data-role="stop" aria-labelledby="stopTitle">
-          <div class="panel-head"><div><h3 id="stopTitle">止损线截图</h3><p>支持水平止损或随时间变化的趋势线止损</p></div><span id="stopBadge" class="badge">等待截图</span></div>
+          <div class="panel-head"><div><h3 id="stopTitle">止损线截图（可选）</h3><p>支持水平止损或随时间变化的趋势线止损</p></div><span id="stopBadge" class="badge">可选 · 等待截图</span></div>
           <div class="panel-body">
+            <label class="option-toggle" for="useStopLine"><input id="useStopLine" type="checkbox" checked /><span><strong>使用止损线</strong><small>关闭后，入场仓位不会自动止损，必须手动平仓。</small></span></label>
+            <div id="stopControls">
             <div id="stopPaste" class="paste-zone" tabindex="0" role="button" aria-label="粘贴或选择止损线截图">
               <div class="paste-placeholder">
                 <svg class="paste-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 5h8M9 3h6a1 1 0 0 1 1 1v2H8V4a1 1 0 0 1 1-1Z"/><path d="M7 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h9l7-7V7a2 2 0 0 0-2-2h-2"/><path d="M14 21v-5a2 2 0 0 1 2-2h5"/></svg>
@@ -305,6 +312,7 @@
             <div class="inline-actions"><select id="stopExpected" aria-label="止损线预期类型"><option value="auto">自动判断线型</option><option value="horizontal">水平线</option><option value="trendline">趋势线</option></select><button id="stopRecognize" class="secondary" type="button" disabled>识别</button><button id="stopClear" class="ghost" type="button" disabled>清除</button></div>
             <div id="stopStatus" class="status-box" role="status" aria-live="polite"></div>
             <div id="stopEditor" class="line-editor hidden"></div>
+            </div>
           </div>
         </section>
       </div>
@@ -313,7 +321,7 @@
         <div class="panel-head"><div><h2 id="chartTitle">组合策略预览</h2><p>识别结果会回画到当前 Futures K 线</p></div><button id="reloadChart" class="ghost" type="button">刷新 K 线</button></div>
         <div class="chart-wrap">
           <canvas id="chart" role="img" aria-label="BTC 合约 K 线、入场线与止损线预览；下方提供当前价格和两条线的文字数值"></canvas>
-          <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
+          <div class="chart-legend"><span class="legend-item"><i class="legend-line"></i>入场线</span><span id="stopLegend" class="legend-item"><i class="legend-line stop"></i>止损线</span></div>
           <div id="chartEmpty" class="chart-empty">正在加载 Futures K 线…</div>
         </div>
         <div class="metric-grid">
@@ -353,7 +361,7 @@
     <div class="dialog-body">
       <h2 id="confirmTitle">确认启用策略</h2>
       <p id="confirmSummary"></p>
-      <div id="liveConfirmWrap" class="confirm-check hidden"><input id="liveConfirm" type="checkbox" /><label for="liveConfirm">我确认这是 Binance USDⓈ-M 实盘策略，入场会发送市价单，止损依赖当前服务持续在线。</label></div>
+      <div id="liveConfirmWrap" class="confirm-check hidden"><input id="liveConfirm" type="checkbox" /><label id="liveConfirmLabel" for="liveConfirm">我确认这是 Binance USDⓈ-M 实盘策略，入场会发送市价单，止损依赖当前服务持续在线。</label></div>
       <div class="dialog-actions"><button id="confirmBack" class="ghost" type="button">返回检查</button><button id="confirmArm" class="primary" type="button">启用策略</button></div>
     </div>
   </dialog>
@@ -371,6 +379,7 @@
     const app = {
       direction: "LONG",
       mode: "simulate",
+      stopEnabled: true,
       activeRole: "entry",
       images: { entry: null, stop: null },
       lines: { entry: null, stop: null },
@@ -406,8 +415,40 @@
       $("simulateBtn").setAttribute("aria-pressed", String(mode === "simulate"));
       $("liveBtn").setAttribute("aria-pressed", String(mode === "live"));
       $("armStrategy").textContent = mode === "live" ? "确认并启用实盘策略" : "确认并启用模拟策略";
-      $("riskNote").classList.toggle("hidden", mode !== "live");
+      updateRiskNote();
       updateReview();
+    }
+
+    function updateRiskNote() {
+      const note = $("riskNote");
+      if (!app.stopEnabled) {
+        note.textContent = app.mode === "live"
+          ? "未启用止损线：实盘入场后不会自动平仓，必须手动处理仓位。"
+          : "未启用止损线：模拟入场后会保持仓位，直到手动取消策略。";
+        note.classList.remove("hidden");
+      } else {
+        note.textContent = "止损由当前服务实时监控；服务与行情同时失联时无法触发平仓。";
+        note.classList.toggle("hidden", app.mode !== "live");
+      }
+    }
+
+    function setStopEnabled(enabled) {
+      app.stopEnabled = Boolean(enabled);
+      $("useStopLine").checked = app.stopEnabled;
+      $("stopControls").inert = !app.stopEnabled;
+      $("stopControls").classList.toggle("disabled-options", !app.stopEnabled);
+      $("stopLegend").classList.toggle("hidden", !app.stopEnabled);
+      $("stopMetric").textContent = app.stopEnabled ? formatPrice(linePriceAt(app.lines.stop, Date.now())) : "未启用";
+      const timelineItems = $("timeline").querySelectorAll("li");
+      timelineItems[2].textContent = app.stopEnabled ? "持仓中监控止损" : "持仓中等待手动处理";
+      timelineItems[3].textContent = app.stopEnabled ? "触发止损并平仓" : "用户手动平仓";
+      if (!app.stopEnabled) {
+        setBadge("stopBadge", "未启用", "warn");
+        setActiveRole("entry");
+      } else if (app.lines.stop) setBadge("stopBadge", "已设置", "ok");
+      else if (app.images.stop) setBadge("stopBadge", "等待识别", "warn");
+      else setBadge("stopBadge", "可选 · 等待截图");
+      updateRiskNote(); updateSteps(); updateReview(); drawChart();
     }
 
     function validateImage(file) {
@@ -521,41 +562,43 @@
       const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr); const w = rect.width, h = rect.height;
       ctx.fillStyle = "#02050c"; ctx.fillRect(0, 0, w, h); if (!app.candles.length) return;
       const pad = { l: 20, r: 72, t: 34, b: 34 }, data = app.candles, startTs = data[0].ts, endTs = data.at(-1).ts;
-      const lineValues = [app.lines.entry, app.lines.stop].flatMap((line) => line ? [linePriceAt(line, startTs), linePriceAt(line, endTs)] : []).filter(Number.isFinite);
+      const visibleStopLine = app.stopEnabled ? app.lines.stop : null;
+      const lineValues = [app.lines.entry, visibleStopLine].flatMap((line) => line ? [linePriceAt(line, startTs), linePriceAt(line, endTs)] : []).filter(Number.isFinite);
       let min = Math.min(...data.map((x) => x.low), ...lineValues), max = Math.max(...data.map((x) => x.high), ...lineValues); const margin = (max - min || 1) * .06; min -= margin; max += margin;
       const x = (ts) => pad.l + (ts - startTs) / (endTs - startTs || 1) * (w - pad.l - pad.r); const y = (price) => pad.t + (max - price) / (max - min || 1) * (h - pad.t - pad.b);
       ctx.font = "11px ui-monospace, Menlo, monospace"; ctx.lineWidth = 1;
       for (let i = 0; i <= 5; i++) { const yy = pad.t + (h - pad.t - pad.b) * i / 5, price = max - (max - min) * i / 5; ctx.strokeStyle = "#152033"; ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke(); ctx.fillStyle = "#7c8ca3"; ctx.textAlign = "right"; ctx.fillText(formatPrice(price), w - 6, yy + 4); }
       const barWidth = Math.max(1, (w - pad.l - pad.r) / data.length * .7);
       data.forEach((candle) => { const xx = x(candle.ts), up = candle.close >= candle.open; ctx.strokeStyle = up ? "#26a69a" : "#ef5350"; ctx.fillStyle = ctx.strokeStyle; ctx.beginPath(); ctx.moveTo(xx, y(candle.high)); ctx.lineTo(xx, y(candle.low)); ctx.stroke(); ctx.fillRect(xx - barWidth / 2, Math.min(y(candle.open), y(candle.close)), barWidth, Math.max(1, Math.abs(y(candle.open) - y(candle.close)))); });
-      [["entry", "#22d3ee", []], ["stop", "#f87171", [8, 6]]].forEach(([role, color, dash]) => { const line = app.lines[role]; if (!line) return; const p1 = linePriceAt(line, startTs), p2 = linePriceAt(line, endTs); if (![p1, p2].every(Number.isFinite)) return; ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x(startTs), y(p1)); ctx.lineTo(x(endTs), y(p2)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = "left"; ctx.fillText(role === "entry" ? "ENTRY" : "STOP", pad.l + 8, y(p1) - 8); });
-      const latest = app.currentStrategy?.current_price || data.at(-1).close, now = Date.now(); $("currentMetric").textContent = formatPrice(latest); $("entryMetric").textContent = formatPrice(linePriceAt(app.lines.entry, now)); $("stopMetric").textContent = formatPrice(linePriceAt(app.lines.stop, now));
+      [["entry", "#22d3ee", []], ["stop", "#f87171", [8, 6]]].forEach(([role, color, dash]) => { const line = role === "stop" ? visibleStopLine : app.lines[role]; if (!line) return; const p1 = linePriceAt(line, startTs), p2 = linePriceAt(line, endTs); if (![p1, p2].every(Number.isFinite)) return; ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x(startTs), y(p1)); ctx.lineTo(x(endTs), y(p2)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = "left"; ctx.fillText(role === "entry" ? "ENTRY" : "STOP", pad.l + 8, y(p1) - 8); });
+      const latest = app.currentStrategy?.current_price || data.at(-1).close, now = Date.now(); $("currentMetric").textContent = formatPrice(latest); $("entryMetric").textContent = formatPrice(linePriceAt(app.lines.entry, now)); $("stopMetric").textContent = app.stopEnabled ? formatPrice(linePriceAt(app.lines.stop, now)) : "未启用";
     }
 
     function lineSummary(line) { if (!line) return "未设置"; return line.kind === "horizontal" ? `水平 @ ${formatPrice(line.price)}` : `趋势线 ${formatPrice(line.price1)} → ${formatPrice(line.price2)}`; }
     function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char])); }
-    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value, chart_timezone: $("timezone").value.trim() || "UTC", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.lines.stop }; }
+    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value, chart_timezone: $("timezone").value.trim() || "UTC", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.stopEnabled ? app.lines.stop : null }; }
     function validateForm() {
       const p = strategyPayload(), errors = [];
       if (!p.symbol) errors.push("请输入交易对"); if (!(p.notional_usdt > 0)) errors.push("名义仓位必须大于 0"); if (!Number.isInteger(p.leverage) || p.leverage < 1 || p.leverage > 125) errors.push("杠杆必须是 1–125 的整数");
-      if (!p.entry_line) errors.push("请识别并确认入场线"); if (!p.stop_line) errors.push("请识别并确认止损线");
+      if (!p.entry_line) errors.push("请识别并确认入场线"); if (app.stopEnabled && !p.stop_line) errors.push("请识别并确认止损线，或关闭“使用止损线”");
       const current = Number(app.currentStrategy?.current_price || app.candles.at(-1)?.close), stop = linePriceAt(p.stop_line, Date.now());
       if (Number.isFinite(current) && Number.isFinite(stop)) { if (p.direction === "LONG" && stop >= current) errors.push("LONG 止损线必须低于当前价格"); if (p.direction === "SHORT" && stop <= current) errors.push("SHORT 止损线必须高于当前价格"); }
       return errors;
     }
     function updateSteps() {
-      const current = app.lines.entry ? (app.lines.stop ? 4 : 3) : 2;
+      const current = app.lines.entry ? (!app.stopEnabled || app.lines.stop ? 4 : 3) : 2;
       [1,2,3,4].forEach((n) => { const step = $(`step${n}`); step.classList.toggle("done", n < current); step.classList.toggle("active", n === current); });
     }
     function updateReview() {
       const p = strategyPayload(), errors = validateForm();
-      $("reviewList").innerHTML = `<div class="review-row"><span>方向</span><b>${escapeHtml(p.direction)}</b></div><div class="review-row"><span>交易对</span><b>${escapeHtml(p.symbol || "--")}</b></div><div class="review-row"><span>名义仓位</span><b>${formatPrice(p.notional_usdt)} USDT</b></div><div class="review-row"><span>全仓杠杆</span><b>${p.leverage}×</b></div><div class="review-row"><span>入场线</span><b>${escapeHtml(lineSummary(p.entry_line))}</b></div><div class="review-row"><span>止损线</span><b>${escapeHtml(lineSummary(p.stop_line))}</b></div><div class="review-row"><span>模式</span><b>${escapeHtml(p.mode.toUpperCase())}</b></div>`;
+      $("reviewList").innerHTML = `<div class="review-row"><span>方向</span><b>${escapeHtml(p.direction)}</b></div><div class="review-row"><span>交易对</span><b>${escapeHtml(p.symbol || "--")}</b></div><div class="review-row"><span>名义仓位</span><b>${formatPrice(p.notional_usdt)} USDT</b></div><div class="review-row"><span>全仓杠杆</span><b>${p.leverage}×</b></div><div class="review-row"><span>入场线</span><b>${escapeHtml(lineSummary(p.entry_line))}</b></div><div class="review-row"><span>止损线</span><b>${escapeHtml(app.stopEnabled ? lineSummary(p.stop_line) : "未启用（需手动平仓）")}</b></div><div class="review-row"><span>模式</span><b>${escapeHtml(p.mode.toUpperCase())}</b></div>`;
       $("armStrategy").disabled = errors.length > 0 || (app.currentStrategy && !terminalStatuses.has(app.currentStrategy.status));
       setBadge("readyBadge", errors.length ? `${errors.length} 项待处理` : "可以启用", errors.length ? "warn" : "ok"); setBox("formStatus", errors.join("\n"), errors.length ? "error" : ""); updateSteps();
     }
 
     function openConfirm() {
-      const p = strategyPayload(); $("confirmSummary").textContent = `${p.direction} ${p.symbol}，名义仓位 ${formatPrice(p.notional_usdt)} USDT，全仓 ${p.leverage}×；启用后若当前价格已越过入场线将立即入场。`;
+      const p = strategyPayload(); $("confirmSummary").textContent = `${p.direction} ${p.symbol}，名义仓位 ${formatPrice(p.notional_usdt)} USDT，全仓 ${p.leverage}×；启用后若当前价格已越过入场线将立即入场。${p.stop_line ? "持仓后将监控止损线。" : "未设置止损，入场后必须手动平仓。"}`;
+      $("liveConfirmLabel").textContent = p.stop_line ? "我确认这是 Binance USDⓈ-M 实盘策略，入场会发送市价单，止损依赖当前服务持续在线。" : "我确认这是 Binance USDⓈ-M 实盘策略，入场会发送市价单，且本策略没有自动止损，仓位必须手动平仓。";
       $("liveConfirmWrap").classList.toggle("hidden", p.mode !== "live"); $("liveConfirm").checked = false; $("confirmArm").disabled = p.mode === "live"; $("confirmDialog").showModal();
     }
     async function armStrategy() {
@@ -575,10 +618,12 @@
       setBadge("strategyBadge", strategy.status.toUpperCase(), bad ? "error" : done ? "ok" : "warn");
       const feed = strategy.feed_state || "connecting"; $("feedPill").textContent = feed === "live" ? "实时行情已连接" : feed === "degraded" ? "REST 降级行情" : feed === "stale" ? "行情已失联" : "正在连接行情"; $("feedPill").className = `live-pill ${feed === "live" ? "live" : feed === "stale" ? "stale" : ""}`;
       const index = statusOrder.indexOf(strategy.status); $("timeline").querySelectorAll("li").forEach((li, i) => { li.classList.toggle("done", index > i || strategy.status === "completed"); li.classList.toggle("current", index === i && !terminalStatuses.has(strategy.status)); });
-      setBox("monitorStatus", strategy.error ? `需要处理：${strategy.error}` : `当前价格 ${formatPrice(strategy.current_price)}\n入场线 ${formatPrice(strategy.entry_line_price)} · 止损线 ${formatPrice(strategy.stop_line_price)}${strategy.entry_price ? `\n入场均价 ${formatPrice(strategy.entry_price)} · 数量 ${formatPrice(strategy.filled_qty)}` : ""}`, strategy.error ? "error" : "info");
+      const stopStatus = strategy.stop_line ? `止损线 ${formatPrice(strategy.stop_line_price)}` : "止损线 未启用（需手动平仓）";
+      setBox("monitorStatus", strategy.error ? `需要处理：${strategy.error}` : `当前价格 ${formatPrice(strategy.current_price)}\n入场线 ${formatPrice(strategy.entry_line_price)} · ${stopStatus}${strategy.entry_price ? `\n入场均价 ${formatPrice(strategy.entry_price)} · 数量 ${formatPrice(strategy.filled_qty)}` : ""}`, strategy.error ? "error" : "info");
       $("events").innerHTML = (strategy.events || []).slice().reverse().map((event) => `<div class="event"><time>${escapeHtml(new Date(event.ts).toLocaleString())}</time>${escapeHtml(event.message || "")}</div>`).join("");
       $("cancelStrategy").classList.toggle("hidden", terminalStatuses.has(strategy.status));
-      app.lines.entry = strategy.entry_line; app.lines.stop = strategy.stop_line; drawChart(); updateReview();
+      $("useStopLine").disabled = !terminalStatuses.has(strategy.status);
+      app.lines.entry = strategy.entry_line; app.lines.stop = strategy.stop_line; setStopEnabled(Boolean(strategy.stop_line));
     }
     function startPolling(id) { clearInterval(app.pollTimer); app.pollTimer = setInterval(async () => { try { const response = await fetch(`${apiBase()}/strategy/watch/${id}`); if (!response.ok) return; const result = await response.json(); renderStrategy(result); if (terminalStatuses.has(result.status)) clearInterval(app.pollTimer); } catch (_) {} }, 2000); }
     async function restoreLatest() { try { const response = await fetch(`${apiBase()}/strategy/watch`); if (!response.ok) return; const items = await response.json(); const active = items.find((item) => !terminalStatuses.has(item.status)); if (active) { renderStrategy(active); startPolling(active.strategy_id); } } catch (_) {} }
@@ -595,11 +640,12 @@
       zone.addEventListener("dragover", (event) => { event.preventDefault(); zone.classList.add("dragging"); }); zone.addEventListener("dragleave", () => zone.classList.remove("dragging")); zone.addEventListener("drop", (event) => { event.preventDefault(); zone.classList.remove("dragging"); if (event.dataTransfer.files[0]) acceptImage(role, event.dataTransfer.files[0]); });
       $(`${role}Recognize`).addEventListener("click", () => recognize(role)); $(`${role}Clear`).addEventListener("click", () => clearRole(role));
     });
-    document.addEventListener("paste", (event) => { const file = Array.from(event.clipboardData?.items || []).find((item) => item.type.startsWith("image/"))?.getAsFile(); if (file) { event.preventDefault(); acceptImage(app.activeRole || (!app.images.entry ? "entry" : "stop"), file); } });
+    document.addEventListener("paste", (event) => { const file = Array.from(event.clipboardData?.items || []).find((item) => item.type.startsWith("image/"))?.getAsFile(); if (file) { event.preventDefault(); acceptImage(app.activeRole || (!app.images.entry || !app.stopEnabled ? "entry" : "stop"), file); } });
     $("longBtn").onclick = () => setDirection("LONG"); $("shortBtn").onclick = () => setDirection("SHORT"); $("simulateBtn").onclick = () => setMode("simulate"); $("liveBtn").onclick = () => setMode("live");
+    $("useStopLine").onchange = (event) => setStopEnabled(event.target.checked);
     ["symbol", "timeframe", "notional", "leverage", "timezone"].forEach((id) => $(id).addEventListener("input", () => { updateReview(); if (["symbol", "timeframe"].includes(id)) clearTimeout(window.chartReloadTimer), window.chartReloadTimer = setTimeout(loadChart, 500); }));
     $("reloadChart").onclick = loadChart; $("armStrategy").onclick = openConfirm; $("confirmBack").onclick = () => $("confirmDialog").close(); $("confirmArm").onclick = armStrategy; $("liveConfirm").onchange = () => { $("confirmArm").disabled = !$("liveConfirm").checked; };
-    $("cancelStrategy").onclick = () => { const open = ["position_open", "exiting"].includes(app.currentStrategy?.status); if (!open) return cancelStrategy(false); $("cancelMessage").textContent = "策略已经入场。停止监控会让仓位失去这条止损保护，请明确选择。"; $("cancelDialog").showModal(); };
+    $("cancelStrategy").onclick = () => { const open = ["position_open", "exiting"].includes(app.currentStrategy?.status); if (!open) return cancelStrategy(false); $("cancelMessage").textContent = app.currentStrategy?.stop_line ? "策略已经入场。停止监控会让仓位失去这条止损保护，请明确选择。" : "策略已经入场且未设置自动止损，请明确选择保留仓位或立即市价平仓。"; $("cancelDialog").showModal(); };
     $("cancelBack").onclick = () => $("cancelDialog").close(); $("leavePosition").onclick = () => cancelStrategy(false); $("closePosition").onclick = () => cancelStrategy(true);
     new ResizeObserver(drawChart).observe($("chart"));
     setMode("simulate"); updateReview(); loadChart(); restoreLatest();

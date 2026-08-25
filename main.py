@@ -3221,7 +3221,7 @@ class FuturesStrategyRequest(BaseModel):
     leverage: int = Field(1, ge=1, le=125)
     mode: Literal["simulate", "live"] = "simulate"
     entry_line: LineSpec
-    stop_line: LineSpec
+    stop_line: Optional[LineSpec] = None
 
     @field_validator("symbol")
     @classmethod
@@ -3367,7 +3367,7 @@ def strategy_public_dict(state: FuturesStrategyState) -> dict[str, Any]:
         "margin_type": "CROSSED",
         "mode": state.payload.mode,
         "entry_line": state.payload.entry_line.model_dump(),
-        "stop_line": state.payload.stop_line.model_dump(),
+        "stop_line": state.payload.stop_line.model_dump() if state.payload.stop_line else None,
         "current_price": state.current_price,
         "current_price_ts": state.current_price_ts,
         "entry_line_price": state.entry_line_price,
@@ -3542,8 +3542,12 @@ def recognize_chart_line(payload: LineRecognitionRequest) -> dict[str, Any]:
     }
 
 
-def validate_stop_side(payload: FuturesStrategyRequest, current_price: float, ts_ms: int) -> tuple[float, float]:
+def validate_stop_side(
+    payload: FuturesStrategyRequest, current_price: float, ts_ms: int
+) -> tuple[float, Optional[float]]:
     entry_price = payload.entry_line.price_at(ts_ms)
+    if payload.stop_line is None:
+        return entry_price, None
     stop_price = payload.stop_line.price_at(ts_ms)
     if payload.direction == "LONG" and stop_price >= current_price:
         raise ValueError("LONG 止损线必须低于当前价格")
@@ -3741,7 +3745,7 @@ def run_futures_strategy(strategy_id: str) -> None:
             state.current_price_ts = price_ts
             state.feed_state = feed_state
             state.entry_line_price = state.payload.entry_line.price_at(price_ts)
-            state.stop_line_price = state.payload.stop_line.price_at(price_ts)
+            state.stop_line_price = state.payload.stop_line.price_at(price_ts) if state.payload.stop_line else None
             state.updated_ts = int(time.time() * 1000)
             if time.monotonic() - state.last_persist_monotonic >= 1:
                 persist_strategy(state)
@@ -3766,9 +3770,15 @@ def run_futures_strategy(strategy_id: str) -> None:
                     state.filled_qty = state.payload.notional_usdt / current_price
                     state.entry_price = current_price
                     state.entry_order = {"simulated": True, "side": "BUY" if state.payload.direction == "LONG" else "SELL"}
-                update_strategy_status(state, "position_open", "入场成交，开始监控止损", entry_price=state.entry_price, quantity=state.filled_qty)
+                position_message = "入场成交，开始监控止损" if state.payload.stop_line else "入场成交；未设置自动止损，等待手动处理"
+                update_strategy_status(state, "position_open", position_message, entry_price=state.entry_price, quantity=state.filled_qty)
 
-            if state.status == "position_open" and should_stop(state.payload, current_price, state.stop_line_price):
+            if (
+                state.status == "position_open"
+                and state.payload.stop_line is not None
+                and state.stop_line_price is not None
+                and should_stop(state.payload, current_price, state.stop_line_price)
+            ):
                 add_strategy_event(state, "stop_triggered", "止损线已触发", trigger_price=current_price, line_price=state.stop_line_price)
                 close_strategy_position(state, current_price)
                 return
@@ -3892,7 +3902,8 @@ def create_futures_strategy(payload: FuturesStrategyRequest):
         entry_line_price=entry_line_price,
         stop_line_price=stop_line_price,
     )
-    state.events.append({"ts": now, "type": "status", "message": "策略已启用，正在等待入场", "details": {"status": "armed"}})
+    armed_message = "策略已启用，正在等待入场" if payload.stop_line else "策略已启用，正在等待入场；未设置自动止损"
+    state.events.append({"ts": now, "type": "status", "message": armed_message, "details": {"status": "armed"}})
     with FUTURES_STRATEGIES_LOCK:
         FUTURES_STRATEGIES[strategy_id] = state
     persist_strategy(state)

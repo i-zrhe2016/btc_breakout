@@ -35,6 +35,16 @@ class LineSpecTests(unittest.TestCase):
         self.assertTrue(main.should_enter(short, 99, 100))
         self.assertTrue(main.should_stop(short, 111, 110))
 
+    def test_stop_line_is_optional(self):
+        payload = main.FuturesStrategyRequest(
+            direction="LONG",
+            notional_usdt=100,
+            entry_line={"kind": "horizontal", "price": 100},
+        )
+        entry, stop = main.validate_stop_side(payload, current_price=95, ts_ms=123)
+        self.assertEqual(entry, 100)
+        self.assertIsNone(stop)
+
 
 class StrategyRuntimeTests(unittest.TestCase):
     def setUp(self):
@@ -91,6 +101,20 @@ class StrategyRuntimeTests(unittest.TestCase):
         self.assertEqual(state.status, "completed")
         self.assertEqual(state.entry_price, 99)
         self.assertEqual(state.exit_price, 111)
+
+    def test_strategy_without_stop_stays_open_until_cancelled(self):
+        payload = main.FuturesStrategyRequest(
+            direction="LONG",
+            notional_usdt=100,
+            entry_line={"kind": "horizontal", "price": 100},
+        )
+        state = self.run_simulation(payload, [99, 101, 80])
+        self.assertEqual(state.status, "position_left_open")
+        self.assertEqual(state.entry_price, 101)
+        self.assertIsNone(state.exit_price)
+        self.assertIsNone(state.stop_line_price)
+        self.assertIsNone(main.strategy_public_dict(state)["stop_line"])
+        self.assertIn("未设置自动止损", next(event["message"] for event in state.events if event["type"] == "status" and "入场成交" in event["message"]))
 
     def test_cancel_open_position_can_leave_position_open(self):
         payload = main.FuturesStrategyRequest(
