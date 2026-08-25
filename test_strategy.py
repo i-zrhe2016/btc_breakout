@@ -16,6 +16,13 @@ class PreviewMarkupTests(unittest.TestCase):
         self.assertIn("segmentEnd", markup)
         self.assertIn("趋势线仅显示锚点区间", markup)
 
+    def test_timeframe_controls_support_auto_detection_and_switching(self):
+        for name in ("recognition.html", "preview.html", "strategy.html"):
+            markup = (Path(__file__).parent / name).read_text(encoding="utf-8")
+            self.assertIn('value="auto"', markup, name)
+            self.assertIn("30m", markup, name)
+            self.assertIn("1w", markup, name)
+
 
 class LineSpecTests(unittest.TestCase):
     def test_strategy_defaults_to_30x_and_utc_plus_8(self):

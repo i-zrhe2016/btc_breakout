@@ -125,6 +125,10 @@
     .segmented button.long.active { color: #bbf7d0; background: var(--green-soft); }
     .segmented button.short.active { color: #fecaca; background: var(--red-soft); }
     .helper { color: var(--faint); font-size: 12px; margin-top: 8px; }
+    .field-state { display: block; margin-top: 5px; color: var(--faint); font-size: 11px; }
+    .field-state.ok { color: #bbf7d0; }
+    .field-state.warn { color: #fde68a; }
+    .field-state.error { color: #fecaca; }
 
     .paste-zone {
       position: relative; min-height: 180px; border: 1px dashed #475569; border-radius: 12px;
@@ -269,14 +273,14 @@
           <div class="panel-body">
             <div class="form-grid">
               <div class="field"><label for="symbol">交易对</label><input id="symbol" value="BTCUSDT" autocomplete="off" /></div>
-              <div class="field"><label for="timeframe">截图周期</label><select id="timeframe"><option>15m</option><option selected>1h</option><option>4h</option><option>1d</option></select></div>
+              <div class="field"><label for="timeframe">截图周期</label><select id="timeframe"><option value="auto" selected>自动识别（左上角）</option><option>1m</option><option>3m</option><option>5m</option><option>15m</option><option>30m</option><option>1h</option><option>2h</option><option>4h</option><option>6h</option><option>8h</option><option>12h</option><option>1d</option><option>3d</option><option>1w</option></select><small id="timeframeState" class="field-state" role="status">等待截图周期</small></div>
               <div class="field full"><label>方向</label><div class="segmented" role="group" aria-label="交易方向"><button id="longBtn" class="long active" type="button" aria-pressed="true">LONG 做多</button><button id="shortBtn" class="short" type="button" aria-pressed="false">SHORT 做空</button></div></div>
               <div class="field"><label for="notional">名义仓位（USDT）</label><input id="notional" type="number" value="100" min="5" step="1" /></div>
               <div class="field"><label for="leverage">杠杆</label><input id="leverage" type="number" value="30" min="1" max="125" step="1" /></div>
               <div class="field full"><label>运行模式</label><div class="segmented" role="group" aria-label="运行模式"><button id="simulateBtn" class="active" type="button" aria-pressed="true">SIMULATE 模拟</button><button id="liveBtn" type="button" aria-pressed="false">LIVE 实盘</button></div></div>
               <div class="field full"><label for="timezone">图表时区</label><select id="timezone"><option value="Asia/Shanghai" selected>UTC+8（北京时间）</option><option value="UTC">UTC</option><option value="Asia/Tokyo">UTC+9（东京）</option><option value="America/New_York">纽约</option></select></div>
             </div>
-            <p class="helper">固定名义价值决定订单数量；杠杆只改变所需保证金。live 会把交易对设置为全仓与所选杠杆。</p>
+            <p class="helper">周期默认读取截图左上角，识别成功后会自动切换 K 线；也可手动切换，切换后需重新校验截图。固定名义价值决定订单数量；杠杆只改变所需保证金。</p>
           </div>
         </section>
 
@@ -389,15 +393,35 @@
       geometries: { entry: null, stop: null },
       candles: [],
       currentStrategy: null,
-      pollTimer: null
+      pollTimer: null,
+      detectedTimeframe: null,
+      timeframeNeedsRecognition: false
     };
     const roleLabel = { entry: "入场线", stop: "止损线" };
+    const supportedTimeframes = new Set(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"]);
+    const chartFallbackTimeframe = "1h";
     const terminalStatuses = new Set(["completed", "cancelled", "position_left_open", "failed", "attention_required"]);
 
     function apiBase() { return String(window.location.origin || "http://127.0.0.1:8000").replace(/\/$/, ""); }
     function formatPrice(value) { return Number.isFinite(Number(value)) ? Number(value).toLocaleString("en-US", { maximumFractionDigits: 4 }) : "--"; }
     function setBox(id, message, kind = "") { const el = $(id); el.textContent = message || ""; el.className = `status-box ${kind}`.trim(); }
     function setBadge(id, text, kind = "") { const el = $(id); el.textContent = text; el.className = `badge ${kind}`.trim(); }
+    function selectedTimeframe() { const value = $("timeframe").value; return value === "auto" ? (app.detectedTimeframe || chartFallbackTimeframe) : value; }
+    function setTimeframeState(message, kind = "") { const el = $("timeframeState"); el.textContent = message; el.className = `field-state ${kind}`.trim(); }
+    function refreshTimeframeState() {
+      const selected = $("timeframe").value;
+      if (selected === "auto") setTimeframeState(app.detectedTimeframe ? `自动模式 · 当前 ${app.detectedTimeframe}` : "等待截图左上角周期", app.detectedTimeframe ? "ok" : "warn");
+      else setTimeframeState(app.detectedTimeframe === selected ? `已确认 · ${selected}` : `手动切换 · ${selected}`, "ok");
+    }
+    function handleTimeframeChange() {
+      const selected = $("timeframe").value;
+      const hasRecognition = Boolean(app.images.entry || app.images.stop || app.lines.entry || app.lines.stop);
+      app.timeframeNeedsRecognition = hasRecognition && Boolean(app.detectedTimeframe) && selected !== "auto" && selected !== app.detectedTimeframe;
+      refreshTimeframeState();
+      updateReview();
+      clearTimeout(window.chartReloadTimer);
+      window.chartReloadTimer = setTimeout(loadChart, 150);
+    }
     function setActiveRole(role) {
       app.activeRole = role;
       ["entry", "stop"].forEach((item) => $(`${item}Paste`).classList.toggle("active", item === role));
@@ -477,6 +501,7 @@
     }
     function clearRole(role) {
       app.images[role] = null; app.lines[role] = null; app.geometries[role] = null;
+      if (!app.images.entry && !app.images.stop && !app.lines.entry && !app.lines.stop) app.timeframeNeedsRecognition = false;
       const zone = $(`${role}Paste`); zone.querySelector(".paste-placeholder").classList.remove("hidden");
       const img = zone.querySelector("img"); img.removeAttribute("src"); img.classList.add("hidden"); zone.querySelector(".geometry").classList.add("hidden");
       $(`${role}Recognize`).disabled = true; $(`${role}Clear`).disabled = true; $(`${role}Editor`).classList.add("hidden");
@@ -496,7 +521,8 @@
     async function recognize(role) {
       if (!app.images[role]) return;
       const button = $(`${role}Recognize`); button.disabled = true; button.textContent = "识别中…";
-      setBadge(`${role}Badge`, "校验周期中", "warn"); setBox(`${role}Status`, `第一步：正在确认截图是否为 ${$("timeframe").value} 周期；匹配后才会继续识别画线…`, "info");
+      const requestedTimeframe = $("timeframe").value;
+      setBadge(`${role}Badge`, "校验周期中", "warn"); setBox(`${role}Status`, requestedTimeframe === "auto" ? "第一步：Codex 正在读取截图左上角周期；确认后才会继续识别画线…" : `第一步：正在确认截图是否为 ${requestedTimeframe} 周期；匹配后才会继续识别画线…`, "info");
       try {
         const body = {
           image_data_url: app.images[role], role,
@@ -510,10 +536,17 @@
         if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
         if (!result?.line) throw new Error(result?.notes || "未识别到可用线段，请换更清晰截图或指定线型");
         app.lines[role] = result.line; app.geometries[role] = result.image_geometry || null;
+        if (supportedTimeframes.has(result.detected_timeframe)) {
+          app.detectedTimeframe = result.detected_timeframe;
+          $("timeframe").value = result.detected_timeframe;
+          app.timeframeNeedsRecognition = false;
+          setTimeframeState(`已自动切换至 ${result.detected_timeframe}`, "ok");
+        }
+        loadChart();
         drawGeometry(role, app.geometries[role]); renderLineEditor(role);
         const low = Number(result.confidence) < .75;
         setBadge(`${role}Badge`, `${result.line.kind === "horizontal" ? "水平线" : "趋势线"} · ${Math.round(Number(result.confidence) * 100)}%`, low ? "warn" : "ok");
-        setBox(`${role}Status`, `周期校验通过：${result.detected_timeframe}（${Math.round(Number(result.timeframe_confidence) * 100)}%）\n${low ? "画线置信度偏低，请人工复核。\n" : ""}${result.notes || "识别完成。"}\n已加入组合预览；下方参数可手动调整。`, low ? "" : "ok");
+        setBox(`${role}Status`, `周期校验通过：${result.detected_timeframe}（${Math.round(Number(result.timeframe_confidence) * 100)}%）\n已自动切换 K 线周期并刷新预览。\n${low ? "画线置信度偏低，请人工复核。\n" : ""}${result.notes || "识别完成。"}\n已加入组合预览；下方参数可手动调整。`, low ? "" : "ok");
         if (role === "entry" && !app.lines.stop) setActiveRole("stop"); updateSteps(); updateReview(); drawChart();
       } catch (error) { setBadge(`${role}Badge`, "识别失败", "error"); setBox(`${role}Status`, `识别失败：${error.message || error}`, "error"); }
       finally { button.disabled = false; button.textContent = "重新识别"; }
@@ -551,10 +584,11 @@
       return Number(line.price1) + (Number(line.price2) - Number(line.price1)) * ((ts - Number(line.ts1)) / span);
     }
     async function loadChart() {
-      $("chartEmpty").classList.remove("hidden"); $("chartEmpty").textContent = "正在加载 Futures K 线…";
+      const timeframe = selectedTimeframe();
+      $("chartEmpty").classList.remove("hidden"); $("chartEmpty").textContent = $("timeframe").value === "auto" && !app.detectedTimeframe ? `尚未识别截图周期，先加载 ${timeframe} K 线…` : `正在加载 ${timeframe} K 线…`;
       $("reloadChart").disabled = true; $("reloadChart").textContent = "加载中…";
       try {
-        const symbol = $("symbol").value.trim().toUpperCase(), timeframe = $("timeframe").value;
+        const symbol = $("symbol").value.trim().toUpperCase();
         const response = await fetch(`${apiBase()}/market/klines?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=500`);
         const result = await response.json().catch(() => null); if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
         if (!Array.isArray(result) || !result.length) throw new Error("行情源返回空数据");
@@ -585,11 +619,13 @@
 
     function lineSummary(line) { if (!line) return "未设置"; return line.kind === "horizontal" ? `水平 @ ${formatPrice(line.price)}` : `趋势线 ${formatPrice(line.price1)} → ${formatPrice(line.price2)}`; }
     function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char])); }
-    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: $("timeframe").value, chart_timezone: $("timezone").value || "Asia/Shanghai", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.stopEnabled ? app.lines.stop : null }; }
+    function strategyPayload() { return { symbol: $("symbol").value.trim().toUpperCase(), timeframe: selectedTimeframe(), chart_timezone: $("timezone").value || "Asia/Shanghai", direction: app.direction, notional_usdt: Number($("notional").value), leverage: Number($("leverage").value), mode: app.mode, entry_line: app.lines.entry, stop_line: app.stopEnabled ? app.lines.stop : null }; }
     function validateForm() {
       const p = strategyPayload(), errors = [];
       if (!p.symbol) errors.push("请输入交易对"); if (!(p.notional_usdt > 0)) errors.push("名义仓位必须大于 0"); if (!Number.isInteger(p.leverage) || p.leverage < 1 || p.leverage > 125) errors.push("杠杆必须是 1–125 的整数");
       if (!p.entry_line) errors.push("请识别并确认入场线"); if (app.stopEnabled && !p.stop_line) errors.push("请识别并确认止损线，或关闭“使用止损线”");
+      if ($("timeframe").value === "auto" && !app.detectedTimeframe) errors.push("请先自动识别截图左上角周期");
+      if (app.timeframeNeedsRecognition) errors.push(`周期已切换为 ${p.timeframe}，请重新识别截图后再启用`);
       const current = Number(app.currentStrategy?.current_price || app.candles.at(-1)?.close), stop = linePriceAt(p.stop_line, Date.now());
       if (Number.isFinite(current) && Number.isFinite(stop)) { if (p.direction === "LONG" && stop >= current) errors.push("LONG 止损线必须低于当前价格"); if (p.direction === "SHORT" && stop <= current) errors.push("SHORT 止损线必须高于当前价格"); }
       return errors;
@@ -600,7 +636,7 @@
     }
     function updateReview() {
       const p = strategyPayload(), errors = validateForm();
-      $("reviewList").innerHTML = `<div class="review-row"><span>方向</span><b>${escapeHtml(p.direction)}</b></div><div class="review-row"><span>交易对</span><b>${escapeHtml(p.symbol || "--")}</b></div><div class="review-row"><span>名义仓位</span><b>${formatPrice(p.notional_usdt)} USDT</b></div><div class="review-row"><span>全仓杠杆</span><b>${p.leverage}×</b></div><div class="review-row"><span>入场线</span><b>${escapeHtml(lineSummary(p.entry_line))}</b></div><div class="review-row"><span>止损线</span><b>${escapeHtml(app.stopEnabled ? lineSummary(p.stop_line) : "未启用（需手动平仓）")}</b></div><div class="review-row"><span>模式</span><b>${escapeHtml(p.mode.toUpperCase())}</b></div>`;
+      $("reviewList").innerHTML = `<div class="review-row"><span>方向</span><b>${escapeHtml(p.direction)}</b></div><div class="review-row"><span>交易对</span><b>${escapeHtml(p.symbol || "--")}</b></div><div class="review-row"><span>周期</span><b>${escapeHtml($("timeframe").value === "auto" ? `${p.timeframe} · 自动` : `${p.timeframe} · 手动`)}</b></div><div class="review-row"><span>名义仓位</span><b>${formatPrice(p.notional_usdt)} USDT</b></div><div class="review-row"><span>全仓杠杆</span><b>${p.leverage}×</b></div><div class="review-row"><span>入场线</span><b>${escapeHtml(lineSummary(p.entry_line))}</b></div><div class="review-row"><span>止损线</span><b>${escapeHtml(app.stopEnabled ? lineSummary(p.stop_line) : "未启用（需手动平仓）")}</b></div><div class="review-row"><span>模式</span><b>${escapeHtml(p.mode.toUpperCase())}</b></div>`;
       $("armStrategy").disabled = errors.length > 0 || (app.currentStrategy && !terminalStatuses.has(app.currentStrategy.status));
       setBadge("readyBadge", errors.length ? `${errors.length} 项待处理` : "可以启用", errors.length ? "warn" : "ok"); setBox("formStatus", errors.join("\n"), errors.length ? "error" : ""); updateSteps();
     }
@@ -623,6 +659,7 @@
     const statusOrder = ["armed", "entering", "position_open", "exiting", "completed"];
     function renderStrategy(strategy) {
       app.currentStrategy = strategy; $("strategyIdLabel").textContent = strategy.strategy_id ? `ID ${strategy.strategy_id.slice(0, 12)}…` : "尚未启用";
+      if (supportedTimeframes.has(strategy.timeframe)) { app.detectedTimeframe = strategy.timeframe; const wasAuto = $("timeframe").value === "auto"; if (wasAuto) $("timeframe").value = strategy.timeframe; app.timeframeNeedsRecognition = false; refreshTimeframeState(); if (wasAuto) loadChart(); }
       const bad = ["failed", "attention_required", "position_left_open"].includes(strategy.status); const done = ["completed", "cancelled"].includes(strategy.status);
       setBadge("strategyBadge", strategy.status.toUpperCase(), bad ? "error" : done ? "ok" : "warn");
       const feed = strategy.feed_state || "connecting"; $("feedPill").textContent = feed === "live" ? "实时行情已连接" : feed === "degraded" ? "Futures REST 降级行情" : feed === "reference" ? "模拟 · SPOT 参考行情" : feed === "stale" ? "行情已失联" : "正在连接行情"; $("feedPill").className = `live-pill ${feed === "live" || feed === "reference" ? "live" : feed === "stale" ? "stale" : ""}`;
@@ -652,12 +689,14 @@
     document.addEventListener("paste", (event) => { const file = Array.from(event.clipboardData?.items || []).find((item) => item.type.startsWith("image/"))?.getAsFile(); if (file) { event.preventDefault(); acceptImage(app.activeRole || (!app.images.entry || !app.stopEnabled ? "entry" : "stop"), file); } });
     $("longBtn").onclick = () => setDirection("LONG"); $("shortBtn").onclick = () => setDirection("SHORT"); $("simulateBtn").onclick = () => setMode("simulate"); $("liveBtn").onclick = () => setMode("live");
     $("useStopLine").onchange = (event) => setStopEnabled(event.target.checked);
-    ["symbol", "timeframe", "notional", "leverage", "timezone"].forEach((id) => $(id).addEventListener("input", () => { updateReview(); if (["symbol", "timeframe"].includes(id)) clearTimeout(window.chartReloadTimer), window.chartReloadTimer = setTimeout(loadChart, 500); }));
+    ["notional", "leverage", "timezone"].forEach((id) => $(id).addEventListener("input", updateReview));
+    $("symbol").addEventListener("input", () => { updateReview(); clearTimeout(window.chartReloadTimer); window.chartReloadTimer = setTimeout(loadChart, 500); });
+    $("timeframe").addEventListener("change", handleTimeframeChange);
     $("reloadChart").onclick = loadChart; $("armStrategy").onclick = openConfirm; $("confirmBack").onclick = () => $("confirmDialog").close(); $("confirmArm").onclick = armStrategy; $("liveConfirm").onchange = () => { $("confirmArm").disabled = !$("liveConfirm").checked; };
     $("cancelStrategy").onclick = () => { const open = ["position_open", "exiting"].includes(app.currentStrategy?.status); if (!open) return cancelStrategy(false); $("cancelMessage").textContent = app.currentStrategy?.stop_line ? "策略已经入场。停止监控会让仓位失去这条止损保护，请明确选择。" : "策略已经入场且未设置自动止损，请明确选择保留仓位或立即市价平仓。"; $("cancelDialog").showModal(); };
     $("cancelBack").onclick = () => $("cancelDialog").close(); $("leavePosition").onclick = () => cancelStrategy(false); $("closePosition").onclick = () => cancelStrategy(true);
     new ResizeObserver(drawChart).observe($("chart"));
-    setMode("simulate"); updateReview(); loadChart(); restoreLatest();
+    setMode("simulate"); refreshTimeframeState(); updateReview(); loadChart(); restoreLatest();
   </script>
 </body>
 </html>
