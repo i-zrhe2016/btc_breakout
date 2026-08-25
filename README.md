@@ -43,6 +43,7 @@ docker compose logs -f api
 - 旧版单截图识别：`http://127.0.0.1:8000/ai`
 - OpenAPI：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/healthz`
+- 公网域名：`https://line.zrhe2016.cc/`（Cloudflare DNS 需指向部署服务器）
 
 ## 使用流程
 

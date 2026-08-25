@@ -3,7 +3,7 @@ services:
     build: .
     container_name: btc_breakout_api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - BINANCE_BASE_URL=${BINANCE_BASE_URL:-https://api.binance.us}
       - BINANCE_FUTURES_BASE_URL=${BINANCE_FUTURES_BASE_URL:-https://fapi.binance.com}
