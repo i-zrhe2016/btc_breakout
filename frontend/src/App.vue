@@ -726,14 +726,14 @@ onMounted(async () => {
     width: chartHost.value.clientWidth,
     height: chartHost.value.clientHeight,
     layout: { background: { type: ColorType.Solid, color: "#070b15" }, textColor: "#a5b4ca", fontFamily: "Inter, system-ui, sans-serif", fontSize: 11 },
-    grid: { vertLines: { color: "#111b2c" }, horzLines: { color: "#111b2c" } },
+    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
     crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#536987", width: 1, style: 3 }, horzLine: { color: "#536987", width: 1, style: 3 } },
     rightPriceScale: { borderColor: "#273753", scaleMargins: { top: 0.08, bottom: 0.08 } },
     timeScale: { borderColor: "#273753", timeVisible: true, secondsVisible: false, rightOffset: rightOffset(), barSpacing: 8, minBarSpacing: 2 },
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
     handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
   });
-  candleSeries = chart.addSeries(CandlestickSeries, { upColor: "#36d483", downColor: "#ff6b78", borderVisible: false, wickUpColor: "#36d483", wickDownColor: "#ff6b78", priceLineVisible: true, lastValueVisible: true });
+  candleSeries = chart.addSeries(CandlestickSeries, { upColor: "#f8fafc", downColor: "#0b0d12", borderVisible: true, borderUpColor: "#f8fafc", borderDownColor: "#f8fafc", wickUpColor: "#f8fafc", wickDownColor: "#f8fafc", priceLineVisible: true, lastValueVisible: true });
   chart.timeScale().subscribeVisibleLogicalRangeChange(refreshOverlay);
   resizeObserver = new ResizeObserver(() => {
     chart.applyOptions({ width: chartHost.value.clientWidth, height: chartHost.value.clientHeight, timeScale: { rightOffset: rightOffset() } });
