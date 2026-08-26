@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -37,7 +38,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("trendline_api")
 ROOT_DIR = Path(__file__).resolve().parent
-STRATEGY_WEB_ENTRY = ROOT_DIR / "strategy.html"
+FRONTEND_DIST_DIR = ROOT_DIR / "frontend" / "dist"
+STRATEGY_WEB_ENTRY = FRONTEND_DIST_DIR / "index.html"
 SETTINGS_WEB_ENTRY = ROOT_DIR / "settings.html"
 INTERVAL_TO_MS = {
     "1m": 60 * 1000,
@@ -88,6 +90,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if (FRONTEND_DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="frontend-assets")
 
 
 JOB_STATUS = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -873,7 +877,7 @@ def healthz() -> Response:
 @app.head("/strategy", include_in_schema=False)
 def serve_strategy_ui():
     if not STRATEGY_WEB_ENTRY.exists():
-        raise HTTPException(status_code=404, detail="strategy.html not found")
+        raise HTTPException(status_code=404, detail="Vue frontend has not been built")
     return FileResponse(STRATEGY_WEB_ENTRY)
 
 

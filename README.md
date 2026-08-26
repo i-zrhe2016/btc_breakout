@@ -4,7 +4,8 @@
 
 ## 主要能力
 
-- Lightweight Charts K 线图，支持交易对、1m–1w 周期、缩放、平移和刷新
+- Vue 3 + Lightweight Charts K 线图，支持交易对、1m–1w 周期、缩放、平移和刷新
+- SVG 矢量画线层，图表平移、缩放和拖到未来空白时保持趋势线可见
 - 手工趋势线与水平线，多条线可同时保存
 - 趋势线按两个锚点的原始斜率自动延长到当前可视区和未来时间
 - 每条线独立选择向上或向下突破方向
@@ -18,6 +19,8 @@
 ## 快速开始
 
 ```bash
+npm --prefix frontend install
+npm --prefix frontend run build
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -41,7 +44,7 @@ docker compose logs -f api
 ## 使用流程
 
 1. 选择交易对和 K 线周期，等待行情加载。
-2. 点击“趋势线”后，依次点击第一、第二锚点；也可以按住拖动快速完成。默认开启“磁吸”，会贴合附近 K 线的开高低收；按 `Esc` 取消当前绘制，选中线后按 `Delete` 删除。或点击“水平线”后在图表上点击价格位置。
+2. 点击“趋势线”后，依次点击第一、第二锚点；也可以按住拖动快速完成。默认开启“磁吸”，会贴合附近 K 线的开高低收；按 `Esc` 取消，选中线后按 `Delete` 删除，按 `←` / `→` 或卡片中的 `1K` 按钮逐根移动。或点击“水平线”后在图表上点击价格位置。
 3. 在右侧线条卡片中选择突破方向，按需设置“入场”和“止损”角色。
 4. 查看选中线的延长价格和历史首次突破 K 线。
 5. 设置方向、名义仓位、杠杆和运行模式，确认后启用策略。
@@ -125,6 +128,7 @@ docker compose up -d --build
 ## 测试
 
 ```bash
+npm --prefix frontend run build
 python -m unittest -v test_strategy.py
 python -m py_compile main.py
 docker compose config --quiet

@@ -8,36 +8,31 @@ from unittest.mock import patch
 import main
 
 
-class ManualDrawingMarkupTests(unittest.TestCase):
-    def test_strategy_uses_manual_chart_tools_and_no_screenshot_flow(self):
-        markup = (Path(__file__).parent / "strategy.html").read_text(encoding="utf-8")
-        self.assertIn("lightweight-charts@4.2.3", markup)
-        self.assertIn('id="trendTool"', markup)
-        self.assertIn('id="horizontalTool"', markup)
-        self.assertIn('id="snapTool"', markup)
-        self.assertIn("function detectBreakout(line)", markup)
-        self.assertIn("function priceAt(line, ts)", markup)
-        self.assertIn("function snapPoint(point)", markup)
-        self.assertIn("function finalizeTrendline(end)", markup)
-        self.assertIn("function chartRightOffset()", markup)
-        self.assertIn("rightOffset: chartRightOffset()", markup)
-        self.assertIn("coordinateToLogical", markup)
-        self.assertIn("getVisibleLogicalRange", markup)
-        self.assertIn("function clampTrendlineAnchorTs", markup)
-        self.assertIn("function clampTrendlineDeltaTs", markup)
-        self.assertIn("timeScale.logicalToCoordinate((numericTs", markup)
-        self.assertIn("单击第一锚点，再单击第二锚点", markup)
-        self.assertNotIn("image_data_url", markup)
-        self.assertNotIn("Codex", markup)
+class VueManualDrawingTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(__file__).parent / "frontend"
+        self.component = (root / "src" / "App.vue").read_text(encoding="utf-8")
+        self.package = (root / "package.json").read_text(encoding="utf-8")
 
-    def test_strategy_persists_multiple_lines_and_strategy_roles(self):
-        markup = (Path(__file__).parent / "strategy.html").read_text(encoding="utf-8")
-        self.assertIn("entryLineId", markup)
-        self.assertIn("stopLineId", markup)
-        self.assertIn("localStorage.setItem(storageKey", markup)
-        self.assertIn("setLineDirection", markup)
-        self.assertIn("cancelDrawing", markup)
-        self.assertIn('event.key === "Delete"', markup)
+    def test_vue_svg_workspace_has_manual_chart_tools(self):
+        self.assertIn('"vue": "3.5.41"', self.package)
+        self.assertIn('"lightweight-charts": "5.2.1"', self.package)
+        self.assertIn('id="trendTool"', self.component)
+        self.assertIn('id="horizontalTool"', self.component)
+        self.assertIn('id="snapTool"', self.component)
+        self.assertIn('class="drawing-overlay"', self.component)
+        self.assertIn("function clipInfiniteLine", self.component)
+        self.assertIn("function detectBreakout", self.component)
+        self.assertNotIn("image_data_url", self.component)
+
+    def test_vue_workspace_keeps_drag_bounds_and_keyboard_alternative(self):
+        self.assertIn("function clampAnchorTime", self.component)
+        self.assertIn("function clampLineDelta", self.component)
+        self.assertIn("logicalToCoordinate", self.component)
+        self.assertIn("coordinateToLogical", self.component)
+        self.assertIn("ArrowLeft", self.component)
+        self.assertIn("ArrowRight", self.component)
+        self.assertIn("localStorage.setItem(storageKey", self.component)
 
 
 class LineSpecTests(unittest.TestCase):
