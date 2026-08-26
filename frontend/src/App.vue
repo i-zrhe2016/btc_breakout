@@ -30,6 +30,9 @@ const currentStrategy = ref(null);
 const undoStack = ref([]);
 const draft = ref(null);
 const activeDrag = ref(null);
+const livePrice = ref(null);
+const livePriceTs = ref(null);
+const livePriceSource = ref(null);
 const overlayTick = ref(0);
 const viewport = reactive({ width: 1, height: 1, left: 0, right: 1, bottom: 1 });
 
@@ -42,7 +45,9 @@ let chart = null;
 let candleSeries = null;
 let resizeObserver = null;
 let refreshTimer = null;
+let priceTimer = null;
 let pollTimer = null;
+let livePricePending = false;
 
 function formatPrice(value) {
   if (value == null || value === "") return "--";
@@ -186,6 +191,39 @@ function undo() {
 function rightOffset() {
   const width = chartHost.value?.clientWidth || window.innerWidth;
   return width < 560 ? 7 : width < 920 ? 11 : 18;
+}
+
+function marketSymbol() {
+  return symbol.value.trim().toUpperCase();
+}
+
+function resetLivePrice() {
+  livePrice.value = null;
+  livePriceTs.value = null;
+  livePriceSource.value = null;
+}
+
+function updateLiveCandle(price, ts) {
+  const nextPrice = Number(price);
+  const nextTs = Number(ts);
+  if (!candleSeries || !candles.value.length || !Number.isFinite(nextPrice) || nextPrice <= 0 || !Number.isFinite(nextTs)) return;
+  const interval = intervalMs();
+  const candleTs = Math.floor(nextTs / interval) * interval;
+  const latest = candles.value.at(-1);
+  if (!latest || candleTs < Number(latest.ts)) return;
+
+  let candle = latest;
+  if (candleTs === Number(latest.ts)) {
+    candle.high = Math.max(Number(latest.high), nextPrice);
+    candle.low = Math.min(Number(latest.low), nextPrice);
+    candle.close = nextPrice;
+  } else {
+    const open = Number(latest.close);
+    candle = { ts: candleTs, time: Math.floor(candleTs / 1000), open, high: Math.max(open, nextPrice), low: Math.min(open, nextPrice), close: nextPrice, source: "live" };
+    candles.value = [...candles.value, candle].slice(-500);
+  }
+  candleSeries.update({ time: candle.time, open: Number(candle.open), high: Number(candle.high), low: Number(candle.low), close: Number(candle.close) });
+  requestAnimationFrame(refreshOverlay);
 }
 
 function refreshOverlay() {
@@ -563,7 +601,9 @@ function detectBreakout(line) {
 const selectedLine = computed(() => lineById(selectedLineId.value));
 const selectedBreakout = computed(() => detectBreakout(selectedLine.value));
 const latestCandle = computed(() => candles.value.at(-1) || null);
-const selectedLinePrice = computed(() => selectedLine.value && latestCandle.value ? priceAt(selectedLine.value, latestCandle.value.ts) : null);
+const currentPrice = computed(() => livePrice.value ?? latestCandle.value?.close ?? null);
+const currentPriceTs = computed(() => livePriceTs.value ?? latestCandle.value?.ts ?? null);
+const selectedLinePrice = computed(() => selectedLine.value && currentPriceTs.value ? priceAt(selectedLine.value, currentPriceTs.value) : null);
 const drawingHint = computed(() => {
   if (tool.value === "trendline") {
     if (draft.value?.error) return `趋势线 · ${draft.value.error} · Esc 取消`;
@@ -607,6 +647,38 @@ function strategyPayload() {
     entry_line: lineForApi(lineById(entryLineId.value)),
     stop_line: lineForApi(lineById(stopLineId.value)),
   };
+}
+
+async function loadLivePrice() {
+  const requestedSymbol = marketSymbol();
+  if (!requestedSymbol) return;
+  if (livePricePending) return;
+  livePricePending = true;
+  try {
+    const response = await fetch(`/market/price?symbol=${encodeURIComponent(requestedSymbol)}`, { cache: "no-store" });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(result?.detail || `HTTP ${response.status}`);
+    if (requestedSymbol !== marketSymbol()) return;
+    const price = Number(result?.price);
+    const ts = Number(result?.ts) || Date.now();
+    if (!Number.isFinite(price) || price <= 0) throw new Error("实时价格无效");
+    livePrice.value = price;
+    livePriceTs.value = ts;
+    livePriceSource.value = result?.source || "binance_futures";
+    feedState.value = livePriceSource.value === "binance_spot_fallback" ? "reference" : "live";
+    updateLiveCandle(price, ts);
+  } catch (_) {
+    if (livePrice.value == null) feedState.value = "error";
+  } finally {
+    livePricePending = false;
+  }
+}
+
+function changeMarket() {
+  saveWorkspace();
+  resetLivePrice();
+  loadChart({ fit: true });
+  loadLivePrice();
 }
 
 function openConfirm() {
@@ -673,6 +745,7 @@ async function loadChart({ fit = false } = {}) {
     if (!Array.isArray(result) || !result.length) throw new Error("行情源返回空数据");
     candles.value = result.map((item) => ({ ...item, ts: Number(item.ts), time: Math.floor(Number(item.ts) / 1000) }));
     candleSeries.setData(candles.value.map((candle) => ({ time: candle.time, open: candle.open, high: candle.high, low: candle.low, close: candle.close })));
+    if (livePrice.value != null && livePriceTs.value != null) updateLiveCandle(livePrice.value, livePriceTs.value);
     if (fit) chart.timeScale().fitContent();
     chart.applyOptions({ timeScale: { rightOffset: rightOffset() } });
     feedState.value = result[0]?.source === "binance_spot_fallback" ? "reference" : "live";
@@ -745,12 +818,15 @@ onMounted(async () => {
   window.addEventListener("pointercancel", onGlobalPointerUp);
   window.addEventListener("keydown", handleKeydown);
   await loadChart({ fit: true });
+  await loadLivePrice();
   restoreLatestStrategy();
   refreshTimer = setInterval(() => loadChart(), 15000);
+  priceTimer = setInterval(loadLivePrice, 1000);
 });
 
 onBeforeUnmount(() => {
   clearInterval(refreshTimer);
+  clearInterval(priceTimer);
   clearInterval(pollTimer);
   resizeObserver?.disconnect();
   chart?.remove();
@@ -769,7 +845,7 @@ onBeforeUnmount(() => {
         <span><strong>BTC Breakout</strong><small>Vue manual drawing terminal</small></span>
       </div>
       <div class="top-actions">
-        <span class="feed-pill" :class="feedState">{{ feedState === "live" ? "行情已连接" : feedState === "reference" ? "参考行情" : feedState === "error" ? "行情异常" : "行情连接中" }}</span>
+        <span class="feed-pill" :class="feedState">{{ feedState === "live" ? "实时行情" : feedState === "reference" ? "参考行情" : feedState === "error" ? "行情异常" : "行情连接中" }}</span>
         <a href="/settings">通知设置</a>
       </div>
     </header>
@@ -779,9 +855,9 @@ onBeforeUnmount(() => {
         <div class="toolbar">
           <div class="toolbar-group market-controls">
             <label for="symbol">交易对</label>
-            <input id="symbol" v-model.trim="symbol" autocomplete="off" @change="saveWorkspace(); loadChart({ fit: true })" />
+            <input id="symbol" v-model.trim="symbol" autocomplete="off" @change="changeMarket" />
             <label for="timeframe">周期</label>
-            <select id="timeframe" v-model="timeframe" @change="saveWorkspace(); loadChart({ fit: true })">
+            <select id="timeframe" v-model="timeframe" @change="changeMarket">
               <option v-for="item in supportedTimeframes" :key="item" :value="item">{{ item }}</option>
             </select>
             <button class="tool-button" type="button" :disabled="loading" @click="loadChart()">{{ loading ? "加载中" : "刷新" }}</button>
@@ -891,7 +967,7 @@ onBeforeUnmount(() => {
         <section class="side-section">
           <div class="section-head"><div><h2>突破信号</h2><p>按手工线延伸计算历史与实时 K 线</p></div><span class="badge" :class="selectedBreakout ? 'ok' : 'warn'">{{ !selectedLine ? "等待画线" : selectedBreakout ? "已突破" : "未突破" }}</span></div>
           <div class="metrics">
-            <div class="metric"><span>当前价格</span><strong>{{ formatPrice(latestCandle?.close) }}</strong></div>
+            <div class="metric"><span>当前价格 · {{ livePrice != null ? (livePriceSource === "binance_spot_fallback" ? "参考" : "实时") : "K线收盘" }}</span><strong>{{ formatPrice(currentPrice) }}</strong></div>
             <div class="metric"><span>选中线价</span><strong>{{ formatPrice(selectedLinePrice) }}</strong></div>
           </div>
           <div class="breakout-box" :class="selectedBreakout ? 'ok' : selectedLine ? 'warn' : ''">

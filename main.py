@@ -1293,6 +1293,36 @@ def fetch_spot_reference_price(symbol: str) -> float:
     return float(data["price"])
 
 
+def fetch_market_price(symbol: str) -> dict[str, Any]:
+    normalized_symbol = symbol.strip().upper()
+    errors: list[str] = []
+    try:
+        price = float(fetch_futures_price(normalized_symbol))
+        if not math.isfinite(price) or price <= 0:
+            raise RuntimeError("Binance Futures 返回了无效价格")
+        return {
+            "symbol": normalized_symbol,
+            "price": price,
+            "ts": int(time.time() * 1000),
+            "source": "binance_futures",
+        }
+    except Exception as exc:
+        errors.append(f"futures: {exc}")
+    try:
+        price = float(fetch_spot_reference_price(normalized_symbol))
+        if not math.isfinite(price) or price <= 0:
+            raise RuntimeError("Binance Spot 返回了无效价格")
+        return {
+            "symbol": normalized_symbol,
+            "price": price,
+            "ts": int(time.time() * 1000),
+            "source": "binance_spot_fallback",
+        }
+    except Exception as exc:
+        errors.append(f"spot: {exc}")
+        raise RuntimeError("实时价格源均不可用；" + "；".join(errors)) from exc
+
+
 def fetch_futures_klines(
     symbol: str,
     timeframe: str,
@@ -1666,6 +1696,17 @@ def market_klines(
         raise HTTPException(status_code=400, detail="unsupported timeframe")
     try:
         return fetch_futures_klines(symbol.strip().upper(), timeframe, limit, start_time, end_time)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/market/price")
+def market_price(symbol: str = "BTCUSDT"):
+    normalized_symbol = symbol.strip().upper()
+    if len(normalized_symbol) < 3:
+        raise HTTPException(status_code=400, detail="invalid symbol")
+    try:
+        return fetch_market_price(normalized_symbol)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

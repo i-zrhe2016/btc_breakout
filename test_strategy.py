@@ -23,6 +23,10 @@ class VueManualDrawingTests(unittest.TestCase):
         self.assertIn('class="drawing-overlay"', self.component)
         self.assertIn("function clipInfiniteLine", self.component)
         self.assertIn("function detectBreakout", self.component)
+        self.assertIn("async function loadLivePrice", self.component)
+        self.assertIn("/market/price?symbol=", self.component)
+        self.assertIn("candleSeries.update", self.component)
+        self.assertIn("priceTimer = setInterval(loadLivePrice, 1000)", self.component)
         self.assertNotIn("image_data_url", self.component)
 
     def test_chart_uses_monochrome_candles_without_background_grid(self):
@@ -40,6 +44,28 @@ class VueManualDrawingTests(unittest.TestCase):
         self.assertIn("ArrowLeft", self.component)
         self.assertIn("ArrowRight", self.component)
         self.assertIn("localStorage.setItem(storageKey", self.component)
+
+
+class MarketPriceTests(unittest.TestCase):
+    def test_market_price_prefers_futures(self):
+        with patch.object(main, "fetch_futures_price", return_value=64001.25) as futures, patch.object(
+            main, "fetch_spot_reference_price"
+        ) as spot:
+            result = main.market_price("btcusdt")
+        self.assertEqual(result["symbol"], "BTCUSDT")
+        self.assertEqual(result["price"], 64001.25)
+        self.assertEqual(result["source"], "binance_futures")
+        futures.assert_called_once_with("BTCUSDT")
+        spot.assert_not_called()
+
+    def test_market_price_falls_back_to_spot_reference(self):
+        with patch.object(main, "fetch_futures_price", side_effect=RuntimeError("HTTP 451")), patch.object(
+            main, "fetch_spot_reference_price", return_value=63998.75
+        ) as spot:
+            result = main.market_price("BTCUSDT")
+        self.assertEqual(result["price"], 63998.75)
+        self.assertEqual(result["source"], "binance_spot_fallback")
+        spot.assert_called_once_with("BTCUSDT")
 
 
 class LineSpecTests(unittest.TestCase):
