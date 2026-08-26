@@ -35,8 +35,9 @@ class VueManualDrawingTests(unittest.TestCase):
     def test_chart_uses_monochrome_candles_without_background_grid(self):
         self.assertIn('vertLines: { visible: false }', self.component)
         self.assertIn('horzLines: { visible: false }', self.component)
-        self.assertIn('upColor: "#f8fafc"', self.component)
+        self.assertIn('upColor: "#070b15"', self.component)
         self.assertIn('downColor: "#0b0d12"', self.component)
+        self.assertIn('borderUpColor: "#f8fafc"', self.component)
         self.assertIn('borderDownColor: "#f8fafc"', self.component)
 
     def test_vue_workspace_keeps_drag_bounds_and_keyboard_alternative(self):

@@ -829,7 +829,7 @@ onMounted(async () => {
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
     handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
   });
-  candleSeries = chart.addSeries(CandlestickSeries, { upColor: "#f8fafc", downColor: "#0b0d12", borderVisible: true, borderUpColor: "#f8fafc", borderDownColor: "#f8fafc", wickUpColor: "#f8fafc", wickDownColor: "#f8fafc", priceLineVisible: false, lastValueVisible: false });
+  candleSeries = chart.addSeries(CandlestickSeries, { upColor: "#070b15", downColor: "#0b0d12", borderVisible: true, borderUpColor: "#f8fafc", borderDownColor: "#f8fafc", wickUpColor: "#f8fafc", wickDownColor: "#f8fafc", priceLineVisible: false, lastValueVisible: false });
   chart.timeScale().subscribeVisibleLogicalRangeChange(refreshOverlay);
   resizeObserver = new ResizeObserver(() => {
     chart.applyOptions({ width: chartHost.value.clientWidth, height: chartHost.value.clientHeight, timeScale: { rightOffset: rightOffset() } });
