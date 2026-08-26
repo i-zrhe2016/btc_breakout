@@ -4,6 +4,7 @@ import {
   CandlestickSeries,
   ColorType,
   CrosshairMode,
+  LineStyle,
   createChart,
 } from "lightweight-charts";
 
@@ -43,6 +44,7 @@ const supportedTimeframes = new Set(["1m", "3m", "5m", "15m", "30m", "1h", "2h",
 
 let chart = null;
 let candleSeries = null;
+let livePriceLine = null;
 let resizeObserver = null;
 let refreshTimer = null;
 let priceTimer = null;
@@ -201,12 +203,32 @@ function resetLivePrice() {
   livePrice.value = null;
   livePriceTs.value = null;
   livePriceSource.value = null;
+  if (candleSeries && livePriceLine) candleSeries.removePriceLine(livePriceLine);
+  livePriceLine = null;
+}
+
+function updateLivePriceLine(price) {
+  const nextPrice = Number(price);
+  if (!candleSeries || !Number.isFinite(nextPrice) || nextPrice <= 0) return;
+  if (!livePriceLine) {
+    livePriceLine = candleSeries.createPriceLine({
+      price: nextPrice,
+      color: "#27d3ee",
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+      title: "实时",
+    });
+  } else {
+    livePriceLine.applyOptions({ price: nextPrice });
+  }
 }
 
 function updateLiveCandle(price, ts) {
   const nextPrice = Number(price);
   const nextTs = Number(ts);
   if (!candleSeries || !candles.value.length || !Number.isFinite(nextPrice) || nextPrice <= 0 || !Number.isFinite(nextTs)) return;
+  updateLivePriceLine(nextPrice);
   const interval = intervalMs();
   const candleTs = Math.floor(nextTs / interval) * interval;
   const latest = candles.value.at(-1);
@@ -666,6 +688,7 @@ async function loadLivePrice() {
     livePriceTs.value = ts;
     livePriceSource.value = result?.source || "binance_futures";
     feedState.value = livePriceSource.value === "binance_spot_fallback" ? "reference" : "live";
+    updateLivePriceLine(price);
     updateLiveCandle(price, ts);
   } catch (_) {
     if (livePrice.value == null) feedState.value = "error";
@@ -806,7 +829,7 @@ onMounted(async () => {
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
     handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
   });
-  candleSeries = chart.addSeries(CandlestickSeries, { upColor: "#f8fafc", downColor: "#0b0d12", borderVisible: true, borderUpColor: "#f8fafc", borderDownColor: "#f8fafc", wickUpColor: "#f8fafc", wickDownColor: "#f8fafc", priceLineVisible: true, lastValueVisible: true });
+  candleSeries = chart.addSeries(CandlestickSeries, { upColor: "#f8fafc", downColor: "#0b0d12", borderVisible: true, borderUpColor: "#f8fafc", borderDownColor: "#f8fafc", wickUpColor: "#f8fafc", wickDownColor: "#f8fafc", priceLineVisible: false, lastValueVisible: false });
   chart.timeScale().subscribeVisibleLogicalRangeChange(refreshOverlay);
   resizeObserver = new ResizeObserver(() => {
     chart.applyOptions({ width: chartHost.value.clientWidth, height: chartHost.value.clientHeight, timeScale: { rightOffset: rightOffset() } });

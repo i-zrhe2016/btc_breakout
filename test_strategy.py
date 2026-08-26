@@ -27,6 +27,9 @@ class VueManualDrawingTests(unittest.TestCase):
         self.assertIn("/market/price?symbol=", self.component)
         self.assertIn("candleSeries.update", self.component)
         self.assertIn("priceTimer = setInterval(loadLivePrice, 1000)", self.component)
+        self.assertIn("candleSeries.createPriceLine", self.component)
+        self.assertIn("livePriceLine.applyOptions({ price: nextPrice })", self.component)
+        self.assertIn('title: "实时"', self.component)
         self.assertNotIn("image_data_url", self.component)
 
     def test_chart_uses_monochrome_candles_without_background_grid(self):
